@@ -83,6 +83,9 @@ static DWORD  g_hookThreadId = 0;
 static bool   g_dragging = false;
 static POINT  g_lastMouse = {};
 
+// Панорама/зум жестами тачпада (двухпальцевый свайп = колесо/гориз.колесо, пинч = Ctrl+колесо)
+const double  TP_WHEEL = 0.8;            // px панорамы на единицу delta колеса
+
 // Отслеживание изменения камеры для троттлинга перерисовки
 static double g_lastCamX = 1e18, g_lastCamY = 1e18;
 
@@ -519,8 +522,8 @@ static bool IsDesktopClass(HWND h) {
            !lstrcmpW(cls, L"SHELLDLL_DefView") || !lstrcmpW(cls, L"SysListView32");
 }
 
-// Обновляет масштаб/якорь по тику колеса. Зум привязан к курсору.
-static void DoZoom(int delta, POINT pt) {
+// Меняет масштаб в `factor` раз с привязкой к точке pt (экранные координаты).
+static void DoZoomFactor(double factor, POINT pt) {
     double cx = pt.x - g_vsX;       // клиентские координаты окна обзора
     double cy = pt.y - g_vsY;
     if (!g_overview && g_zoom >= 0.999) {
@@ -529,14 +532,30 @@ static void DoZoom(int delta, POINT pt) {
         g_axWX = cx + g_vsX + g_camX;
         g_axWY = cy + g_vsY + g_camY;
     }
-    double wx = g_axWX + (cx - g_axCX) / g_zoom;   // мир под курсором
+    double wx = g_axWX + (cx - g_axCX) / g_zoom;   // мир под точкой
     double wy = g_axWY + (cy - g_axCY) / g_zoom;
-    if (delta > 0) g_zoomTarget *= ZOOM_STEP;       // к себе = приблизить
-    else           g_zoomTarget /= ZOOM_STEP;       // от себя = отдалить
+    g_zoomTarget *= factor;
     if (g_zoomTarget > 1.0)      g_zoomTarget = 1.0;
     if (g_zoomTarget < ZOOM_MIN) g_zoomTarget = ZOOM_MIN;
-    g_axWX = wx; g_axCX = cx;                        // переякорить на курсор
+    g_axWX = wx; g_axCX = cx;                        // переякорить на точку
     g_axWY = wy; g_axCY = cy;
+}
+
+// Тик колеса: один шаг зума к/от курсора.
+static void DoZoom(int delta, POINT pt) {
+    DoZoomFactor(delta > 0 ? ZOOM_STEP : 1.0 / ZOOM_STEP, pt);
+}
+
+// Панорама холста двухпальцевым скроллом (delta колеса/гориз.колеса).
+// Холст следует за пальцами; вертикаль и горизонталь — независимо.
+static void PanWheel(double dxDelta, double dyDelta) {
+    if (g_overview) {
+        g_axCX -= dxDelta * TP_WHEEL;
+        g_axCY += dyDelta * TP_WHEEL;
+    } else {
+        g_targetX += dxDelta * TP_WHEEL;  // плавно через easing
+        g_targetY -= dyDelta * TP_WHEEL;
+    }
 }
 
 // ---------- Глобальный hook СКМ/колеса ----------
@@ -574,12 +593,18 @@ static LRESULT CALLBACK MouseProc(int code, WPARAM wp, LPARAM lp) {
         case WM_MOUSEWHEEL: {
             int delta = (short)HIWORD(m->mouseData);
             bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-            // зум: в обзоре, по Ctrl+колесо где угодно, либо над пустым рабочим столом
-            if (g_overview || ctrl || IsDesktopClass(WindowFromPoint(m->pt))) {
-                DoZoom(delta, m->pt);
-                return 1;   // поглощаем, чтобы не прокручивать
-            }
-            break;          // иначе — обычная прокрутка в приложении
+            bool onDesk = g_overview || IsDesktopClass(WindowFromPoint(m->pt));
+            if (!onDesk) break;                              // внутри приложения — обычная прокрутка
+            // Классический клик колеса мыши кратен 120 => зум (как раньше).
+            // Мелкая дельта двухпальцевого скролла тачпада => панорама.
+            bool mouseWheel = (delta % WHEEL_DELTA) == 0;
+            if (ctrl || mouseWheel) { DoZoom(delta, m->pt); return 1; }   // зум
+            PanWheel(0.0, (double)delta); return 1;          // 2 пальца верт. => панорама
+        }
+        case WM_MOUSEHWHEEL: {
+            bool onDesk = g_overview || IsDesktopClass(WindowFromPoint(m->pt));
+            if (onDesk) { PanWheel((double)(short)HIWORD(m->mouseData), 0.0); return 1; }  // 2 пальца гориз.
+            break;
         }
         case WM_MBUTTONUP:
             if (g_dragging) { g_dragging = false; return 1; }
