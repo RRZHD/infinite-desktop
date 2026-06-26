@@ -71,9 +71,7 @@ static MapXform g_xform;
 // Фоновый холст-подложка на весь виртуальный экран
 static HWND g_bg = nullptr;
 static bool g_bgAttached = false;        // прикреплён ли холст на уровень обоев
-static HDC     g_bgMemDC = nullptr;     // кэш двойной буферизации подложки
-static HBITMAP g_bgBmp = nullptr;
-static int     g_bgCacheW = 0, g_bgCacheH = 0;
+static LONG g_bgLastCamX = 0, g_bgLastCamY = 0;  // камера, под которую подложка уже отрисована
 const int GRID = 80;                     // шаг сетки холста, px
 
 // Панорама средней кнопкой мыши (глобальный hook на отдельном потоке)
@@ -444,17 +442,6 @@ static void AttachBackdrop() {
 }
 
 // ---------- Фоновый холст (подложка на все экраны) ----------
-static void EnsureBgCache(HDC ref, int w, int h) {
-    if (g_bgMemDC && g_bgCacheW == w && g_bgCacheH == h) return;
-    // DC удаляем ПЕРВЫМ: пока битмап выбран в DC, DeleteObject не сработает (утечка)
-    if (g_bgMemDC){ DeleteDC(g_bgMemDC);  g_bgMemDC = nullptr; }
-    if (g_bgBmp)  { DeleteObject(g_bgBmp); g_bgBmp = nullptr; }
-    g_bgMemDC = CreateCompatibleDC(ref);
-    g_bgBmp   = CreateCompatibleBitmap(ref, w, h);
-    SelectObject(g_bgMemDC, g_bgBmp);
-    g_bgCacheW = w; g_bgCacheH = h;
-}
-
 // Сетка холста, сдвинутая по камере => визуально «бесконечное» полотно.
 static void DrawGrid(HDC hdc, const RECT& client) {
     HBRUSH bg = CreateSolidBrush(RGB(24, 26, 32));
@@ -495,15 +482,29 @@ static LRESULT CALLBACK BgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
+        // Рисуем прямо в DC окна: BeginPaint ограничивает область вывода зоной
+        // обновления, поэтому при скролле перерисовывается лишь узкая полоска.
         RECT rc; GetClientRect(hwnd, &rc);
-        EnsureBgCache(hdc, rc.right, rc.bottom);
-        DrawGrid(g_bgMemDC, rc);
-        BitBlt(hdc, 0, 0, rc.right, rc.bottom, g_bgMemDC, 0, 0, SRCCOPY);
+        DrawGrid(hdc, rc);
         EndPaint(hwnd, &ps);
         return 0;
     }
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+// Сместить подложку под текущую камеру через скролл: перерисовывается только
+// открывшаяся полоска, а не весь виртуальный экран — это убирает рывки панорамы.
+static void ScrollBackdrop() {
+    if (!g_bg) return;
+    LONG nx = (LONG)llround(g_camX), ny = (LONG)llround(g_camY);
+    LONG dx = g_bgLastCamX - nx, dy = g_bgLastCamY - ny;  // содержимое смещается на -(Δкамеры)
+    if (dx == 0 && dy == 0) return;
+    g_bgLastCamX = nx; g_bgLastCamY = ny;
+    if (labs(dx) >= g_vsW || labs(dy) >= g_vsH)
+        InvalidateRect(g_bg, nullptr, FALSE);             // скачок больше экрана — целиком
+    else
+        ScrollWindowEx(g_bg, dx, dy, nullptr, nullptr, nullptr, nullptr, SW_INVALIDATE);
 }
 
 // ---------- Зум колесом (вход в обзор) ----------
@@ -727,6 +728,8 @@ static LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // изменилась конфигурация мониторов
         UpdateVirtualScreen();
         PlaceBackdrop();
+        g_bgLastCamX = (LONG)llround(g_camX);   // подложка перерисована целиком
+        g_bgLastCamY = (LONG)llround(g_camY);
         if (g_ov) SetWindowPos(g_ov, HWND_TOPMOST, g_vsX, g_vsY, g_vsW, g_vsH,
                                SWP_NOACTIVATE | (g_overview ? 0 : SWP_NOREDRAW));
         InvalidateRect(hwnd, nullptr, FALSE);
@@ -779,7 +782,7 @@ static LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (camChanged) {
             g_lastCamX = g_camX; g_lastCamY = g_camY;
             RepositionAll();                                  // двигаем реальные окна
-            if (g_bg) InvalidateRect(g_bg, nullptr, FALSE);   // подложка едет с камерой
+            ScrollBackdrop();                                 // подложка едет с камерой (скролл)
             if (g_hudVisible) {
                 RECT rc; GetClientRect(g_hud, &rc);
                 ComputeXform(rc);
@@ -995,8 +998,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
     UnregisterAllThumbs();
     UnregisterAllOvThumbs();
-    if (g_bgMemDC) DeleteDC(g_bgMemDC);
-    if (g_bgBmp)   DeleteObject(g_bgBmp);
     if (g_ovMemDC) DeleteDC(g_ovMemDC);
     if (g_ovBmp)   DeleteObject(g_ovBmp);
     if (g_ov)      DestroyWindow(g_ov);
