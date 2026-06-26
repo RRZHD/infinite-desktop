@@ -29,6 +29,13 @@
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "dwmapi.lib")
 
+#ifndef SPI_GETWINARRANGING
+#define SPI_GETWINARRANGING 0x0082
+#endif
+#ifndef SPI_SETWINARRANGING
+#define SPI_SETWINARRANGING 0x0083
+#endif
+
 // ---------- Состояние ----------
 struct TrackedWin {
     HWND       hwnd;
@@ -819,6 +826,24 @@ static DWORD WINAPI HookThreadProc(LPVOID param) {
     return 0;
 }
 
+// Aero Snap (прилипание окон к краям/верху экрана). На бесконечном столе краёв
+// нет, поэтому на время работы отключаем системное «упорядочивание окон» и
+// восстанавливаем прежнее значение при выходе.
+static BOOL g_prevWinArranging = TRUE;
+
+static void DisableSnap() {
+    g_prevWinArranging = TRUE;
+    SystemParametersInfoW(SPI_GETWINARRANGING, 0, &g_prevWinArranging, 0);
+    if (g_prevWinArranging)
+        SystemParametersInfoW(SPI_SETWINARRANGING, 0, (PVOID)FALSE, SPIF_SENDCHANGE);
+}
+
+static void RestoreSnap() {
+    if (g_prevWinArranging)   // вернуть, только если изначально был включён
+        SystemParametersInfoW(SPI_SETWINARRANGING, 0,
+                              (PVOID)(INT_PTR)g_prevWinArranging, SPIF_SENDCHANGE);
+}
+
 // Включить осведомлённость о DPI на уровне монитора (для точных координат
 // при разных масштабах на разных мониторах), с откатом на системный режим.
 static void EnableDpiAwareness() {
@@ -835,6 +860,7 @@ static void EnableDpiAwareness() {
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     EnableDpiAwareness();
     UpdateVirtualScreen();
+    DisableSnap();   // на бесконечном столе краёв нет — выключаем Aero Snap
 
     // Класс и окно фоновой подложки (на весь виртуальный экран)
     WNDCLASSW bgc = {};
@@ -915,6 +941,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         WaitForSingleObject(g_hookThread, 1000);
         CloseHandle(g_hookThread);
     }
+    RestoreSnap();   // вернуть прежнее состояние Aero Snap
+
     // вернуть окна на исходные места (камера домой), пока hook уже остановлен
     HideOverview();
     g_camX = g_camY = 0;
