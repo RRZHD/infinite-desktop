@@ -23,6 +23,8 @@
 #include <windows.h>
 #include <timeapi.h>
 #include <dwmapi.h>
+#include <objidl.h>
+#include <gdiplus.h>
 #include <vector>
 #include <string>
 #include <fstream>
@@ -32,6 +34,8 @@
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "winmm.lib")
+#pragma comment(lib, "gdiplus.lib")
+#pragma comment(lib, "msimg32.lib")
 
 #ifndef SPI_GETWINARRANGING
 #define SPI_GETWINARRANGING 0x0082
@@ -109,6 +113,11 @@ const double  ZOOM_EASE = 0.25;
 static HDC     g_ovMemDC = nullptr;       // кэш двойной буферизации обзора
 static HBITMAP g_ovBmp = nullptr;
 static int     g_ovCacheW = 0, g_ovCacheH = 0;
+// Обои пользователя для фона обзора (затемняются по мере отдаления)
+static ULONG_PTR g_gdiToken = 0;
+static HDC     g_wallDC = nullptr;
+static HBITMAP g_wallBmp = nullptr;
+static int     g_wallW = 0, g_wallH = 0;
 
 // ---------- Виртуальный экран ----------
 static void UpdateVirtualScreen() {
@@ -186,6 +195,8 @@ static void UnregisterAllThumbs() {
 }
 
 // Превью для полноэкранного обзора (зум)
+static std::vector<HWND> g_ovZ;   // z-порядок отслеживаемых окон (сверху вниз) на момент обзора
+
 static void RegisterOvThumb(TrackedWin& w) {
     if (w.thumbOv || !g_ov) return;
     DwmRegisterThumbnail(g_ov, w.hwnd, &w.thumbOv);
@@ -193,7 +204,22 @@ static void RegisterOvThumb(TrackedWin& w) {
 static void UnregisterOvThumb(TrackedWin& w) {
     if (w.thumbOv) { DwmUnregisterThumbnail(w.thumbOv); w.thumbOv = nullptr; }
 }
-static void RegisterAllOvThumbs()   { for (auto& w : g_wins) RegisterOvThumb(w); }
+
+static BOOL CALLBACK OvZProc(HWND h, LPARAM) {     // собрать отслеживаемые в z-порядке
+    for (auto& w : g_wins) if (w.hwnd == h) { g_ovZ.push_back(h); break; }
+    return TRUE;
+}
+
+// Превью регистрируем СНИЗУ ВВЕРХ по текущему z-порядку: DWM компонует их в порядке
+// регистрации, поэтому верхнее окно (зарегистрированное последним) ложится поверх —
+// как на реальном рабочем столе.
+static void RegisterAllOvThumbs() {
+    g_ovZ.clear();
+    EnumWindows(OvZProc, 0);                        // сверху вниз
+    for (auto it = g_ovZ.rbegin(); it != g_ovZ.rend(); ++it)
+        for (auto& w : g_wins) if (w.hwnd == *it) { RegisterOvThumb(w); break; }
+    for (auto& w : g_wins) RegisterOvThumb(w);      // добрать не попавшие в EnumWindows
+}
 static void UnregisterAllOvThumbs() { for (auto& w : g_wins) UnregisterOvThumb(w); }
 
 static void RebuildWindowList() {
@@ -681,10 +707,71 @@ static void EnsureOvCache(HDC ref, int w, int h) {
     g_ovCacheW = w; g_ovCacheH = h;
 }
 
+// Рендер обоев пользователя в кэш g_wallBmp (по каждому монитору, режим «Заполнение»).
+struct WallCtx { Gdiplus::Graphics* g; Gdiplus::Bitmap* img; };
+static BOOL CALLBACK WallMonProc(HMONITOR hm, HDC, LPRECT, LPARAM lp) {
+    WallCtx* c = (WallCtx*)lp;
+    MONITORINFO mi = { sizeof(mi) };
+    if (!GetMonitorInfoW(hm, &mi)) return TRUE;
+    double mx = mi.rcMonitor.left - g_vsX, my = mi.rcMonitor.top - g_vsY;
+    double mw = mi.rcMonitor.right - mi.rcMonitor.left, mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
+    double iw = c->img->GetWidth(), ih = c->img->GetHeight();
+    if (iw < 1 || ih < 1) return TRUE;
+    double s = max(mw / iw, mh / ih);   // cover (как «Заполнение» в Windows)
+    double dw = iw * s, dh = ih * s;
+    double dx = mx + (mw - dw) / 2, dy = my + (mh - dh) / 2;
+    Gdiplus::Region clip(Gdiplus::RectF((Gdiplus::REAL)mx, (Gdiplus::REAL)my,
+                                        (Gdiplus::REAL)mw, (Gdiplus::REAL)mh));
+    c->g->SetClip(&clip);
+    c->g->DrawImage(c->img, (Gdiplus::REAL)dx, (Gdiplus::REAL)dy,
+                    (Gdiplus::REAL)dw, (Gdiplus::REAL)dh);
+    c->g->ResetClip();
+    return TRUE;
+}
+
+static void LoadWallpaper() {
+    if (g_wallDC)  { DeleteDC(g_wallDC);   g_wallDC = nullptr; }
+    if (g_wallBmp) { DeleteObject(g_wallBmp); g_wallBmp = nullptr; }
+    g_wallW = g_wallH = 0;
+
+    wchar_t path[MAX_PATH] = {};
+    if (!SystemParametersInfoW(SPI_GETDESKWALLPAPER, MAX_PATH, path, 0) || !path[0]) return;
+    Gdiplus::Bitmap img(path);
+    if (img.GetLastStatus() != Gdiplus::Ok) return;
+
+    HDC screen = GetDC(nullptr);
+    g_wallDC  = CreateCompatibleDC(screen);
+    g_wallBmp = CreateCompatibleBitmap(screen, g_vsW, g_vsH);
+    ReleaseDC(nullptr, screen);
+    if (!g_wallDC || !g_wallBmp) return;
+    SelectObject(g_wallDC, g_wallBmp);
+
+    RECT full = { 0, 0, g_vsW, g_vsH };
+    HBRUSH bk = CreateSolidBrush(RGB(16, 18, 23));   // на случай зазоров между мониторами
+    FillRect(g_wallDC, &full, bk);
+    DeleteObject(bk);
+    {
+        Gdiplus::Graphics g(g_wallDC);
+        g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+        WallCtx ctx = { &g, &img };
+        EnumDisplayMonitors(nullptr, nullptr, WallMonProc, (LPARAM)&ctx);
+    }
+    g_wallW = g_vsW; g_wallH = g_vsH;
+}
+
 static void DrawOverview(HDC hdc, const RECT& client) {
-    HBRUSH bg = CreateSolidBrush(RGB(16, 18, 23));   // тёмный холст скрывает реальный стол
+    HBRUSH bg = CreateSolidBrush(RGB(0, 0, 0));
     FillRect(hdc, &client, bg);
     DeleteObject(bg);
+    if (g_wallBmp) {
+        // Обои пользователя, затемнённые тем сильнее, чем дальше отдалили.
+        double dim = (1.0 - g_zoom) / (1.0 - ZOOM_MIN);
+        if (dim < 0) dim = 0; if (dim > 1) dim = 1;
+        BYTE a = (BYTE)((1.0 - dim * 0.7) * 255.0);   // не темнее ~70%
+        BLENDFUNCTION bf = { AC_SRC_OVER, 0, a, 0 };
+        AlphaBlend(hdc, 0, 0, client.right, client.bottom,
+                   g_wallDC, 0, 0, g_wallW, g_wallH, bf);
+    }
 
     // рамки окон (видны как контур вокруг живых превью)
     HPEN pen = CreatePen(PS_SOLID, 1, RGB(80, 100, 130));
@@ -723,12 +810,16 @@ static LRESULT CALLBACK OvProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_LBUTTONDOWN: {
         double cx = (short)LOWORD(lp), cy = (short)HIWORD(lp);
-        // какое окно под курсором (берём верхнее — последнее в списке)
+        // верхнее окно под курсором: идём по z-порядку сверху вниз, берём первое
         g_ovDragHwnd = nullptr;
-        for (auto& w : g_wins) {
-            double l = OvClientX(w.world.left),  t = OvClientY(w.world.top);
-            double r = OvClientX(w.world.right), b = OvClientY(w.world.bottom);
-            if (cx >= l && cx <= r && cy >= t && cy <= b) g_ovDragHwnd = w.hwnd;
+        for (HWND h : g_ovZ) {
+            for (auto& w : g_wins) if (w.hwnd == h) {
+                double l = OvClientX(w.world.left),  t = OvClientY(w.world.top);
+                double r = OvClientX(w.world.right), b = OvClientY(w.world.bottom);
+                if (cx >= l && cx <= r && cy >= t && cy <= b) g_ovDragHwnd = h;
+                break;
+            }
+            if (g_ovDragHwnd) break;
         }
         g_ovDragLast.x = (LONG)cx; g_ovDragLast.y = (LONG)cy;
         g_ovDragMoved = false;
@@ -803,6 +894,7 @@ static LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DISPLAYCHANGE: {
         // изменилась конфигурация мониторов
         UpdateVirtualScreen();
+        LoadWallpaper();                        // перерисовать обои под новое разрешение
         PlaceBackdrop();
         g_bgLastCamX = (LONG)llround(g_camX);   // подложка перерисована целиком
         g_bgLastCamY = (LONG)llround(g_camY);
@@ -811,6 +903,9 @@ static LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     }
+    case WM_SETTINGCHANGE:
+        if (wp == SPI_SETDESKWALLPAPER) LoadWallpaper();   // пользователь сменил обои
+        break;
     case WM_HOTKEY: {
         switch (wp) {
         case HK_LEFT:    PanBy(-PAN_STEP, 0); break;
@@ -1096,7 +1191,12 @@ static void FrameTick(double dt) {
     else g_zoom = g_zoomTarget;
     bool wantOv = (g_zoom < 0.999) || (g_zoomTarget < 0.999);
     if (wantOv && !g_overview) ShowOverview();
-    if (!wantOv && g_overview) { CommitZoomCam(); HideOverview(); }
+    if (!wantOv && g_overview) {
+        CommitZoomCam();
+        RepositionAll();   // расставить окна ДО скрытия обзора — иначе виден «прыжок»
+        g_lastCamX = g_camX; g_lastCamY = g_camY;
+        HideOverview();
+    }
     if (g_overview) { UpdateOverview(); return; }
 
     if (!g_dragging) {
@@ -1142,20 +1242,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     UpdateVirtualScreen();
     DisableSnap();   // на бесконечном столе краёв нет — выключаем Aero Snap
 
-    // Класс и окно фоновой подложки (на весь виртуальный экран)
-    WNDCLASSW bgc = {};
-    bgc.lpfnWndProc = BgProc;
-    bgc.hInstance = hInst;
-    bgc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    bgc.lpszClassName = L"InfiniteDesktopBG";
-    RegisterClassW(&bgc);
+    Gdiplus::GdiplusStartupInput gsi;
+    Gdiplus::GdiplusStartup(&g_gdiToken, &gsi, nullptr);
+    LoadWallpaper();   // обои пользователя для фона обзора
 
-    g_bg = CreateWindowExW(
-        WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
-        bgc.lpszClassName, L"", WS_POPUP,
-        g_vsX, g_vsY, g_vsW, g_vsH,
-        nullptr, nullptr, hInst, nullptr);
-    AttachBackdrop();   // прикрепить холст на уровень обоев (виден на всех мониторах)
+    // Фоновую сетку-подложку не создаём: оставляем реальные обои пользователя.
+    // (g_bg == nullptr — вся логика подложки становится no-op.)
 
     // Класс и окно полноэкранного обзора (зум), пока скрыто
     WNDCLASSW oc = {};
@@ -1272,6 +1364,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     UnregisterAllOvThumbs();
     if (g_ovMemDC) DeleteDC(g_ovMemDC);
     if (g_ovBmp)   DeleteObject(g_ovBmp);
+    if (g_wallDC)  DeleteDC(g_wallDC);
+    if (g_wallBmp) DeleteObject(g_wallBmp);
+    if (g_gdiToken) Gdiplus::GdiplusShutdown(g_gdiToken);
     if (g_ov)      DestroyWindow(g_ov);
     if (g_bg)      DestroyWindow(g_bg);
     return 0;
