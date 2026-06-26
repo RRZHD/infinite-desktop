@@ -826,6 +826,29 @@ static DWORD WINAPI HookThreadProc(LPVOID param) {
     return 0;
 }
 
+// Подъезд камеры к активируемому окну (Win+Tab, Alt+Tab, клик по панели задач).
+// Если окно стало активным, но не видно целиком в текущем вьюпорте — плавно
+// центрируем стол на нём, вместо того чтобы оставить его за краем экрана.
+static HWINEVENTHOOK g_winEventHook = nullptr;
+
+static void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd,
+                                  LONG idObject, LONG, DWORD, DWORD) {
+    if (event != EVENT_SYSTEM_FOREGROUND || idObject != OBJID_WINDOW || !hwnd) return;
+    if (g_overview) return;   // в режиме обзора зум не трогаем
+    for (auto& w : g_wins) {
+        if (w.hwnd != hwnd) continue;
+        LONG cx = (LONG)llround(g_camX), cy = (LONG)llround(g_camY);
+        RECT s = { w.world.left - cx, w.world.top - cy,
+                   w.world.right - cx, w.world.bottom - cy };   // позиция на экране
+        bool fullyVisible = (s.left >= g_vsX && s.top >= g_vsY &&
+                             s.right <= g_vsX + g_vsW && s.bottom <= g_vsY + g_vsH);
+        if (!fullyVisible)
+            CenterOn((w.world.left + w.world.right) / 2.0,
+                     (w.world.top + w.world.bottom) / 2.0);   // подъехать к окну
+        return;
+    }
+}
+
 // Aero Snap (прилипание окон к краям/верху экрана). На бесконечном столе краёв
 // нет, поэтому на время работы отключаем системное «упорядочивание окон» и
 // восстанавливаем прежнее значение при выходе.
@@ -929,6 +952,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     // Глобальный hook СКМ/колеса — на отдельном потоке (устойчив к подвисаниям)
     g_hookThread = CreateThread(nullptr, 0, HookThreadProc, hInst, 0, &g_hookThreadId);
 
+    // Подъезд камеры к активируемому окну (Win+Tab / Alt+Tab / панель задач)
+    g_winEventHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
+                                     nullptr, WinEventProc, 0, 0,
+                                     WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0)) {
         TranslateMessage(&msg);
@@ -936,6 +964,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     }
 
     KillTimer(g_hud, 1);
+    if (g_winEventHook) UnhookWinEvent(g_winEventHook);
     if (g_hookThreadId) PostThreadMessageW(g_hookThreadId, WM_QUIT, 0, 0);
     if (g_hookThread) {
         WaitForSingleObject(g_hookThread, 1000);
