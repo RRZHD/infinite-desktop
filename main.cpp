@@ -21,6 +21,7 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <timeapi.h>
 #include <dwmapi.h>
 #include <vector>
 #include <string>
@@ -30,6 +31,7 @@
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "winmm.lib")
 
 #ifndef SPI_GETWINARRANGING
 #define SPI_GETWINARRANGING 0x0082
@@ -57,6 +59,7 @@ static HWND g_hud = nullptr;                    // окно миникарты
 static bool g_hudVisible = true;
 static bool g_previewsOn = true;                // живые DWM-превью на миникарте
 static int  g_syncCounter = 0;
+static DWORD g_lastHudTick = 0, g_lastSyncTick = 0;  // троттлинг миникарты/синхронизации по времени
 
 // Хоткеи
 enum {
@@ -262,12 +265,14 @@ static void RepositionAll() {
     LONG cx = (LONG)llround(g_camX), cy = (LONG)llround(g_camY);
     for (auto& w : g_wins) {
         if (!IsWindow(w.hwnd)) continue;
-        if (IsZoomed(w.hwnd)) continue;   // развёрнутые пропускаем: ShowWindow синхронен
-                                          // и может заблокировать поток на занятом окне
+        if (IsZoomed(w.hwnd)) continue;          // развёрнутые приклеены к монитору
+        if (IsHungAppWindow(w.hwnd)) continue;   // не блокировать кадр на зависшем окне
         int x = w.world.left - cx;
         int y = w.world.top  - cy;
+        // Синхронно (без SWP_ASYNCWINDOWPOS): применяется сразу => окна точно следуют
+        // за курсором, без «желейного» отставания от очереди асинхронных запросов.
         SetWindowPos(w.hwnd, nullptr, x, y, 0, 0,
-                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
 }
 
@@ -829,53 +834,6 @@ static LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     }
-    case WM_TIMER: {
-        // --- зум-обзор колесом ---
-        if (fabs(g_zoomTarget - g_zoom) > 0.001) g_zoom += (g_zoomTarget - g_zoom) * ZOOM_EASE;
-        else g_zoom = g_zoomTarget;
-        bool wantOv = (g_zoom < 0.999) || (g_zoomTarget < 0.999);
-        if (wantOv && !g_overview) ShowOverview();
-        if (!wantOv && g_overview) { CommitZoomCam(); HideOverview(); }
-        if (g_overview) { UpdateOverview(); return 0; }   // в обзоре обычная логика не нужна
-
-        // плавная анимация для клавиатурных панорам (СКМ двигает камеру в hook'е)
-        if (!g_dragging) {
-            double dx = g_targetX - g_camX, dy = g_targetY - g_camY;
-            if (fabs(dx) > 0.5 || fabs(dy) > 0.5) {
-                g_camX += dx * EASE;
-                g_camY += dy * EASE;
-                if (fabs(g_targetX - g_camX) < 0.5) g_camX = g_targetX;
-                if (fabs(g_targetY - g_camY) < 0.5) g_camY = g_targetY;
-            }
-        }
-
-        bool camChanged = (g_camX != g_lastCamX || g_camY != g_lastCamY);
-        if (camChanged) {
-            g_lastCamX = g_camX; g_lastCamY = g_camY;
-            RepositionAll();                                  // двигаем реальные окна
-            ScrollBackdrop();                                 // подложка едет с камерой (скролл)
-            if (g_hudVisible) {
-                RECT rc; GetClientRect(g_hud, &rc);
-                ComputeXform(rc);
-                UpdateThumbs(rc);
-                InvalidateRect(g_hud, nullptr, FALSE);
-            }
-        } else if (!g_dragging) {
-            // покой — периодически подхватываем ручные перемещения окон
-            if (++g_syncCounter >= 20) {
-                g_syncCounter = 0;
-                SyncWorldFromScreen();
-                AddNewWindows();          // подхватить только что открытые окна
-                if (g_hudVisible) {
-                    RECT rc; GetClientRect(g_hud, &rc);
-                    ComputeXform(rc);
-                    UpdateThumbs(rc);
-                    InvalidateRect(g_hud, nullptr, FALSE);
-                }
-            }
-        }
-        return 0;
-    }
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
@@ -1130,6 +1088,54 @@ static void GatherToDesktop() {
     }
 }
 
+// Один кадр анимации/панорамы. dt — реальное время кадра (сглаживание не зависит
+// от частоты кадров). Вызывается из высокочастотного цикла, а не по WM_TIMER.
+static void FrameTick(double dt) {
+    double kz = 1.0 - pow(1.0 - ZOOM_EASE, dt * 60.0);   // эквивалент при 60 Гц
+    if (fabs(g_zoomTarget - g_zoom) > 0.001) g_zoom += (g_zoomTarget - g_zoom) * kz;
+    else g_zoom = g_zoomTarget;
+    bool wantOv = (g_zoom < 0.999) || (g_zoomTarget < 0.999);
+    if (wantOv && !g_overview) ShowOverview();
+    if (!wantOv && g_overview) { CommitZoomCam(); HideOverview(); }
+    if (g_overview) { UpdateOverview(); return; }
+
+    if (!g_dragging) {
+        double k = 1.0 - pow(1.0 - EASE, dt * 60.0);
+        double dx = g_targetX - g_camX, dy = g_targetY - g_camY;
+        if (fabs(dx) > 0.5 || fabs(dy) > 0.5) {
+            g_camX += dx * k; g_camY += dy * k;
+            if (fabs(g_targetX - g_camX) < 0.5) g_camX = g_targetX;
+            if (fabs(g_targetY - g_camY) < 0.5) g_camY = g_targetY;
+        }
+    }
+
+    bool camChanged = (g_camX != g_lastCamX || g_camY != g_lastCamY);
+    if (camChanged) {
+        g_lastCamX = g_camX; g_lastCamY = g_camY;
+        RepositionAll();        // реальные окна — каждый кадр (вплоть до частоты монитора)
+        ScrollBackdrop();       // подложка — тоже каждый кадр
+        DWORD now = GetTickCount();
+        if (g_hudVisible && now - g_lastHudTick >= 16) {   // миникарта ~60 Гц достаточно
+            g_lastHudTick = now;
+            RECT rc; GetClientRect(g_hud, &rc);
+            ComputeXform(rc); UpdateThumbs(rc);
+            InvalidateRect(g_hud, nullptr, FALSE);
+        }
+    } else if (!g_dragging) {
+        DWORD now = GetTickCount();
+        if (now - g_lastSyncTick >= 300) {                 // периодическая синхронизация
+            g_lastSyncTick = now;
+            SyncWorldFromScreen();
+            AddNewWindows();
+            if (g_hudVisible) {
+                RECT rc; GetClientRect(g_hud, &rc);
+                ComputeXform(rc); UpdateThumbs(rc);
+                InvalidateRect(g_hud, nullptr, FALSE);
+            }
+        }
+    }
+}
+
 // ---------- main ----------
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     EnableDpiAwareness();
@@ -1201,8 +1207,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         ComputeXform(rc);
         UpdateThumbs(rc);
     }
-    SetTimer(g_hud, 1, 16, nullptr);   // ~60 FPS
-
     // Глобальный hook СКМ/колеса — на отдельном потоке (устойчив к подвисаниям)
     g_hookThread = CreateThread(nullptr, 0, HookThreadProc, hInst, 0, &g_hookThreadId);
 
@@ -1211,13 +1215,45 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
                                      nullptr, WinEventProc, 0, 0,
                                      WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
 
-    MSG msg;
-    while (GetMessageW(&msg, nullptr, 0, 0)) {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
-    }
+    // Высокочастотный цикл кадров: панорама плавная на мониторах >60 Гц.
+    // Когда есть движение — тикаем ~200 Гц; в покое спим и тикаем ~33 Гц (для синхронизации).
+    timeBeginPeriod(1);
+    // Частота кадров = частота монитора: двигать окна чаще бессмысленно (дисплей
+    // не покажет) и при синхронном SetWindowPos лишь грузит CPU.
+    DEVMODEW dm = {}; dm.dmSize = sizeof(dm);
+    double hz = 120.0;
+    if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1)
+        hz = (double)dm.dmDisplayFrequency;
+    if (hz < 60.0) hz = 60.0;
+    if (hz > 240.0) hz = 240.0;
+    LARGE_INTEGER qf, prev;
+    QueryPerformanceFrequency(&qf);
+    QueryPerformanceCounter(&prev);
+    const double TARGET = 1.0 / hz;
+    bool running = true;
+    while (running) {
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) { running = false; break; }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        if (!running) break;
 
-    KillTimer(g_hud, 1);
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        double dt = (double)(now.QuadPart - prev.QuadPart) / (double)qf.QuadPart;
+        bool active = g_dragging || g_overview ||
+                      fabs(g_targetX - g_camX) > 0.5 || fabs(g_targetY - g_camY) > 0.5 ||
+                      fabs(g_zoomTarget - g_zoom) > 0.001;
+        double step = active ? TARGET : 0.030;
+        DWORD waitms;
+        if (dt >= step) { prev = now; FrameTick(dt); waitms = (DWORD)(step * 1000.0); }
+        else            { waitms = (DWORD)((step - dt) * 1000.0 + 0.5); }
+        MsgWaitForMultipleObjectsEx(0, nullptr, waitms, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+    }
+    timeEndPeriod(1);
+
     if (g_winEventHook) UnhookWinEvent(g_winEventHook);
     if (g_hookThreadId) PostThreadMessageW(g_hookThreadId, WM_QUIT, 0, 0);
     if (g_hookThread) {
