@@ -831,6 +831,20 @@ static DWORD WINAPI HookThreadProc(LPVOID param) {
 // центрируем стол на нём, вместо того чтобы оставить его за краем экрана.
 static HWINEVENTHOOK g_winEventHook = nullptr;
 
+// Центрировать мировую точку по центру монитора, где сейчас курсор (там, где
+// окно «вызывается»), а не по центру всех мониторов.
+static void CenterOnCursorMonitor(double wx, double wy) {
+    POINT pt;
+    if (!GetCursorPos(&pt)) { CenterOn(wx, wy); return; }
+    MONITORINFO mi = { sizeof(mi) };
+    if (GetMonitorInfoW(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), &mi)) {
+        g_targetX = wx - (mi.rcMonitor.left + mi.rcMonitor.right) / 2.0;
+        g_targetY = wy - (mi.rcMonitor.top  + mi.rcMonitor.bottom) / 2.0;
+    } else {
+        CenterOn(wx, wy);
+    }
+}
+
 static void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd,
                                   LONG idObject, LONG, DWORD, DWORD) {
     if (event != EVENT_SYSTEM_FOREGROUND || idObject != OBJID_WINDOW || !hwnd) return;
@@ -840,11 +854,13 @@ static void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd,
         LONG cx = (LONG)llround(g_camX), cy = (LONG)llround(g_camY);
         RECT s = { w.world.left - cx, w.world.top - cy,
                    w.world.right - cx, w.world.bottom - cy };   // позиция на экране
-        bool fullyVisible = (s.left >= g_vsX && s.top >= g_vsY &&
-                             s.right <= g_vsX + g_vsW && s.bottom <= g_vsY + g_vsH);
-        if (!fullyVisible)
-            CenterOn((w.world.left + w.world.right) / 2.0,
-                     (w.world.top + w.world.bottom) / 2.0);   // подъехать к окну
+        // Видно хотя бы частично? Тогда не трогаем — фокус только для окон,
+        // которые целиком за пределами всех мониторов.
+        bool visible = (s.left < g_vsX + g_vsW && s.right > g_vsX &&
+                        s.top  < g_vsY + g_vsH && s.bottom > g_vsY);
+        if (!visible)
+            CenterOnCursorMonitor((w.world.left + w.world.right) / 2.0,
+                                  (w.world.top + w.world.bottom) / 2.0);   // подъехать к окну
         return;
     }
 }
