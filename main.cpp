@@ -96,6 +96,10 @@ static double g_zoom = 1.0;              // текущий масштаб обз
 static double g_zoomTarget = 1.0;        // целевой масштаб
 // Якорь зума: мировая точка g_axW удерживается в клиентской точке g_axC
 static double g_axWX = 0, g_axWY = 0, g_axCX = 0, g_axCY = 0;
+// Перетаскивание окна/панорама внутри обзора
+static HWND   g_ovDragHwnd = nullptr;    // перетаскиваемое окно (или nullptr — фон)
+static POINT  g_ovDragLast = {};
+static bool   g_ovDragMoved = false;
 const double  ZOOM_MIN = 0.08;           // самый дальний зум-аут
 const double  ZOOM_STEP = 1.15;          // множитель на тик колеса
 const double  ZOOM_EASE = 0.25;
@@ -714,12 +718,52 @@ static LRESULT CALLBACK OvProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_LBUTTONDOWN: {
         double cx = (short)LOWORD(lp), cy = (short)HIWORD(lp);
-        double wx = g_axWX + (cx - g_axCX) / g_zoom;
-        double wy = g_axWY + (cy - g_axCY) / g_zoom;
-        // центрировать клик и плавно вернуться в 1:1
-        g_axWX = wx; g_axCX = g_vsW / 2.0;
-        g_axWY = wy; g_axCY = g_vsH / 2.0;
-        g_zoomTarget = 1.0;
+        // какое окно под курсором (берём верхнее — последнее в списке)
+        g_ovDragHwnd = nullptr;
+        for (auto& w : g_wins) {
+            double l = OvClientX(w.world.left),  t = OvClientY(w.world.top);
+            double r = OvClientX(w.world.right), b = OvClientY(w.world.bottom);
+            if (cx >= l && cx <= r && cy >= t && cy <= b) g_ovDragHwnd = w.hwnd;
+        }
+        g_ovDragLast.x = (LONG)cx; g_ovDragLast.y = (LONG)cy;
+        g_ovDragMoved = false;
+        SetCapture(hwnd);
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        if (GetCapture() != hwnd) return 0;
+        double cx = (short)LOWORD(lp), cy = (short)HIWORD(lp);
+        double ddx = cx - g_ovDragLast.x, ddy = cy - g_ovDragLast.y;
+        if (!g_ovDragMoved && (fabs(ddx) > 3 || fabs(ddy) > 3)) g_ovDragMoved = true;
+        if (g_ovDragMoved) {
+            if (g_ovDragHwnd) {
+                // двигаем окно: мировой сдвиг = клиентский / масштаб
+                LONG wdx = (LONG)llround(ddx / g_zoom), wdy = (LONG)llround(ddy / g_zoom);
+                for (auto& w : g_wins) if (w.hwnd == g_ovDragHwnd) {
+                    w.world.left += wdx; w.world.right += wdx;
+                    w.world.top  += wdy; w.world.bottom += wdy;
+                    break;
+                }
+            } else {
+                g_axCX += ddx; g_axCY += ddy;   // тащим фон => панорама обзора
+            }
+        }
+        g_ovDragLast.x = (LONG)cx; g_ovDragLast.y = (LONG)cy;
+        return 0;
+    }
+    case WM_LBUTTONUP: {
+        bool moved = g_ovDragMoved;
+        if (GetCapture() == hwnd) ReleaseCapture();
+        g_ovDragHwnd = nullptr; g_ovDragMoved = false;
+        if (!moved) {
+            // простой клик => приблизить точку и вернуться в 1:1
+            double cx = (short)LOWORD(lp), cy = (short)HIWORD(lp);
+            double wx = g_axWX + (cx - g_axCX) / g_zoom;
+            double wy = g_axWY + (cy - g_axCY) / g_zoom;
+            g_axWX = wx; g_axCX = g_vsW / 2.0;
+            g_axWY = wy; g_axCY = g_vsH / 2.0;
+            g_zoomTarget = 1.0;
+        }
         return 0;
     }
     }
