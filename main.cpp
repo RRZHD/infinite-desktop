@@ -1069,6 +1069,37 @@ static void RestoreSnap() {
         SystemParametersInfoW(SPI_SETWINARRANGING, TRUE, nullptr, SPIF_SENDCHANGE);
 }
 
+// Иконки рабочего стола рисует окно SHELLDLL_DefView (дочернее у Progman/WorkerW).
+// Скрываем их на время работы и возвращаем при выходе.
+static HWND g_iconsWin = nullptr;
+static bool g_iconsWereVisible = false;
+
+static BOOL CALLBACK FindDefViewProc(HWND top, LPARAM lp) {
+    HWND def = FindWindowExW(top, nullptr, L"SHELLDLL_DefView", nullptr);
+    if (def) { *(HWND*)lp = def; return FALSE; }
+    return TRUE;
+}
+
+static HWND FindDesktopIcons() {
+    HWND progman = FindWindowW(L"Progman", nullptr);
+    HWND def = progman ? FindWindowExW(progman, nullptr, L"SHELLDLL_DefView", nullptr) : nullptr;
+    if (!def) EnumWindows(FindDefViewProc, (LPARAM)&def);  // иногда внутри WorkerW
+    return def;
+}
+
+static void HideDesktopIcons() {
+    g_iconsWin = FindDesktopIcons();
+    if (g_iconsWin) {
+        g_iconsWereVisible = IsWindowVisible(g_iconsWin) != 0;
+        if (g_iconsWereVisible) ShowWindow(g_iconsWin, SW_HIDE);
+    }
+}
+
+static void RestoreDesktopIcons() {
+    if (g_iconsWin && g_iconsWereVisible && IsWindow(g_iconsWin))
+        ShowWindow(g_iconsWin, SW_SHOW);
+}
+
 // Включить осведомлённость о DPI на уровне монитора (для точных координат
 // при разных масштабах на разных мониторах), с откатом на системный режим.
 static void EnableDpiAwareness() {
@@ -1314,7 +1345,8 @@ static void FrameTick(double dt) {
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     EnableDpiAwareness();
     UpdateVirtualScreen();
-    DisableSnap();   // на бесконечном столе краёв нет — выключаем Aero Snap
+    DisableSnap();          // на бесконечном столе краёв нет — выключаем Aero Snap
+    HideDesktopIcons();     // убираем ярлыки рабочего стола на время работы
 
     Gdiplus::GdiplusStartupInput gsi;
     Gdiplus::GdiplusStartup(&g_gdiToken, &gsi, nullptr);
@@ -1426,7 +1458,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         WaitForSingleObject(g_hookThread, 1000);
         CloseHandle(g_hookThread);
     }
-    RestoreSnap();   // вернуть прежнее состояние Aero Snap (и привязки)
+    RestoreSnap();          // вернуть прежнее состояние Aero Snap (и привязки)
+    RestoreDesktopIcons();  // вернуть ярлыки рабочего стола
 
     // сохранить раскладку и собрать окна обратно на видимый рабочий стол
     HideOverview();
