@@ -118,6 +118,10 @@ static ULONG_PTR g_gdiToken = 0;
 static HDC     g_wallDC = nullptr;
 static HBITMAP g_wallBmp = nullptr;
 static int     g_wallW = 0, g_wallH = 0;
+static HDC     g_blackDC = nullptr;       // 1x1 чёрный для мягких теней (AlphaBlend)
+static HBITMAP g_blackBmp = nullptr;
+// Троттлинг перерисовки обзора (не каждый кадр, только при изменениях)
+static double  g_ovLastZoom = -1, g_ovLastAxCX = 0, g_ovLastAxCY = 0, g_ovLastAxWX = 0, g_ovLastAxWY = 0;
 
 // ---------- Виртуальный экран ----------
 static void UpdateVirtualScreen() {
@@ -562,10 +566,12 @@ static void DoZoomFactor(double factor, POINT pt) {
     double cx = pt.x - g_vsX;       // клиентские координаты окна обзора
     double cy = pt.y - g_vsY;
     if (!g_overview && g_zoom >= 0.999) {
-        // вход в обзор: якорь так, чтобы при z=1 совпасть с реальными позициями
+        // вход в обзор: якорь так, чтобы при z=1 ТОЧНО совпасть с реальными окнами.
+        // Реальные окна ставятся по llround(камеры) — берём её же, иначе на входе/
+        // выходе превью прыгают на ~1px.
         g_axCX = cx; g_axCY = cy;
-        g_axWX = cx + g_vsX + g_camX;
-        g_axWY = cy + g_vsY + g_camY;
+        g_axWX = cx + g_vsX + (double)llround(g_camX);
+        g_axWY = cy + g_vsY + (double)llround(g_camY);
     }
     double wx = g_axWX + (cx - g_axCX) / g_zoom;   // мир под точкой
     double wy = g_axWY + (cy - g_axCY) / g_zoom;
@@ -655,6 +661,7 @@ static double OvClientY(double wy) { return g_axCY + (wy - g_axWY) * g_zoom; }
 
 static void ShowOverview() {
     if (g_overview) return;
+    g_ovLastZoom = -1;   // форсировать первую перерисовку
     RegisterAllOvThumbs();
     SetWindowPos(g_ov, HWND_TOPMOST, g_vsX, g_vsY, g_vsW, g_vsH, SWP_NOACTIVATE);
     ShowWindow(g_ov, SW_SHOWNA);
@@ -681,8 +688,8 @@ static void UpdateOverview() {
     if (!g_overview) return;
     for (auto& w : g_wins) {
         if (!w.thumbOv) continue;
-        RECT d = { (LONG)OvClientX(w.world.left),  (LONG)OvClientY(w.world.top),
-                   (LONG)OvClientX(w.world.right), (LONG)OvClientY(w.world.bottom) };
+        RECT d = { (LONG)llround(OvClientX(w.world.left)),  (LONG)llround(OvClientY(w.world.top)),
+                   (LONG)llround(OvClientX(w.world.right)), (LONG)llround(OvClientY(w.world.bottom)) };
         DWM_THUMBNAIL_PROPERTIES p = {};
         p.dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE |
                     DWM_TNP_OPACITY | DWM_TNP_SOURCECLIENTAREAONLY;
@@ -759,6 +766,35 @@ static void LoadWallpaper() {
     g_wallW = g_vsW; g_wallH = g_vsH;
 }
 
+static void EnsureBlack() {
+    if (g_blackDC) return;
+    HDC s = GetDC(nullptr);
+    g_blackDC = CreateCompatibleDC(s);
+    g_blackBmp = CreateCompatibleBitmap(s, 1, 1);
+    ReleaseDC(nullptr, s);
+    SelectObject(g_blackDC, g_blackBmp);
+    SetPixelV(g_blackDC, 0, 0, RGB(0, 0, 0));
+}
+
+// Мягкая тень под окно: несколько расширяющихся скруглённых слоёв чёрного с малой
+// альфой, накапливающихся в градиент (как тень окна Windows). Превью ложится сверху.
+static void DrawShadow(HDC hdc, const RECT& r, int radius) {
+    EnsureBlack();
+    BLENDFUNCTION bf = { AC_SRC_OVER, 0, 16, 0 };   // ~16 альфы на слой
+    for (int i = 7; i >= 1; --i) {
+        RECT s = r;
+        InflateRect(&s, i, i);
+        OffsetRect(&s, 0, i / 2 + 1);               // лёгкое смещение вниз
+        HRGN rgn = CreateRoundRectRgn(s.left, s.top, s.right, s.bottom,
+                                      radius + i, radius + i);
+        SelectClipRgn(hdc, rgn);
+        AlphaBlend(hdc, s.left, s.top, s.right - s.left, s.bottom - s.top,
+                   g_blackDC, 0, 0, 1, 1, bf);
+        DeleteObject(rgn);
+    }
+    SelectClipRgn(hdc, nullptr);
+}
+
 static void DrawOverview(HDC hdc, const RECT& client) {
     HBRUSH bg = CreateSolidBrush(RGB(0, 0, 0));
     FillRect(hdc, &client, bg);
@@ -773,19 +809,15 @@ static void DrawOverview(HDC hdc, const RECT& client) {
                    g_wallDC, 0, 0, g_wallW, g_wallH, bf);
     }
 
-    // рамки окон (видны как контур вокруг живых превью)
-    HPEN pen = CreatePen(PS_SOLID, 1, RGB(80, 100, 130));
-    HGDIOBJ op = SelectObject(hdc, pen);
-    HGDIOBJ ob = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    // Тени под окна (без рамок) — превью с закруглениями Win11 лягут поверх.
+    int radius = (int)(8.0 * g_zoom + 0.5);
+    if (radius < 2) radius = 2;
     for (auto& w : g_wins) {
-        RECT d = { (LONG)OvClientX(w.world.left),  (LONG)OvClientY(w.world.top),
-                   (LONG)OvClientX(w.world.right), (LONG)OvClientY(w.world.bottom) };
-        InflateRect(&d, 1, 1);
-        Rectangle(hdc, d.left, d.top, d.right, d.bottom);
+        RECT d = { (LONG)llround(OvClientX(w.world.left)),  (LONG)llround(OvClientY(w.world.top)),
+                   (LONG)llround(OvClientX(w.world.right)), (LONG)llround(OvClientY(w.world.bottom)) };
+        if (d.right <= d.left || d.bottom <= d.top) continue;
+        DrawShadow(hdc, d, radius);
     }
-    SelectObject(hdc, ob);
-    SelectObject(hdc, op);
-    DeleteObject(pen);
 
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, RGB(150, 160, 175));
@@ -1189,15 +1221,30 @@ static void FrameTick(double dt) {
     double kz = 1.0 - pow(1.0 - ZOOM_EASE, dt * 60.0);   // эквивалент при 60 Гц
     if (fabs(g_zoomTarget - g_zoom) > 0.001) g_zoom += (g_zoomTarget - g_zoom) * kz;
     else g_zoom = g_zoomTarget;
-    bool wantOv = (g_zoom < 0.999) || (g_zoomTarget < 0.999);
+    bool wantOv = (g_zoom < 1.0) || (g_zoomTarget < 1.0);
     if (wantOv && !g_overview) ShowOverview();
-    if (!wantOv && g_overview) {
-        CommitZoomCam();
-        RepositionAll();   // расставить окна ДО скрытия обзора — иначе виден «прыжок»
-        g_lastCamX = g_camX; g_lastCamY = g_camY;
-        HideOverview();
+    if (g_overview) {
+        // Скрываем обзор ТОЛЬКО после кадра на масштабе ровно 1.0 — тогда превью
+        // точно совпадает с реальным окном (размер и позиция), и переход бесшовный.
+        if (!wantOv && g_ovLastZoom >= 1.0) {
+            CommitZoomCam();
+            RepositionAll();   // окна на местах ДО скрытия обзора
+            g_lastCamX = g_camX; g_lastCamY = g_camY;
+            HideOverview();
+            // дальше — обычная логика (окна уже расставлены)
+        } else {
+            // перерисовываем обзор только при изменениях (зум/панорама/перетаскивание)
+            bool ovChanged = (g_zoom != g_ovLastZoom || g_axCX != g_ovLastAxCX ||
+                              g_axCY != g_ovLastAxCY || g_axWX != g_ovLastAxWX ||
+                              g_axWY != g_ovLastAxWY || g_ovDragHwnd != nullptr);
+            if (ovChanged) {
+                g_ovLastZoom = g_zoom; g_ovLastAxCX = g_axCX; g_ovLastAxCY = g_axCY;
+                g_ovLastAxWX = g_axWX; g_ovLastAxWY = g_axWY;
+                UpdateOverview();
+            }
+            return;
+        }
     }
-    if (g_overview) { UpdateOverview(); return; }
 
     if (!g_dragging) {
         double k = 1.0 - pow(1.0 - EASE, dt * 60.0);
@@ -1366,6 +1413,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     if (g_ovBmp)   DeleteObject(g_ovBmp);
     if (g_wallDC)  DeleteDC(g_wallDC);
     if (g_wallBmp) DeleteObject(g_wallBmp);
+    if (g_blackDC) DeleteDC(g_blackDC);
+    if (g_blackBmp) DeleteObject(g_blackBmp);
     if (g_gdiToken) Gdiplus::GdiplusShutdown(g_gdiToken);
     if (g_ov)      DestroyWindow(g_ov);
     if (g_bg)      DestroyWindow(g_bg);
