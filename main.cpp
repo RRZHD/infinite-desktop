@@ -28,6 +28,7 @@
 #include <vector>
 #include <string>
 #include <fstream>
+#include <sstream>
 #include <cmath>
 
 #pragma comment(lib, "user32.lib")
@@ -74,6 +75,15 @@ enum {
 };
 const double PAN_STEP = 400.0;   // шаг панорамы в пикселях мира
 const double EASE     = 0.22;    // коэффициент сглаживания камеры
+
+// Настраиваемые горячие клавиши (сохраняются между сеансами)
+struct KeyBind { UINT mods; UINT vk; const wchar_t* name; };
+static KeyBind g_keys[HK_PIN + 1];   // индекс = HK_*
+static HWND g_settings = nullptr;    // окно настроек горячих клавиш
+static int  g_capRow = -1;           // строка в режиме перехвата клавиш (или -1)
+// Геометрия окна настроек
+const int SET_W = 400, SET_HEADER = 52, SET_ROW = 30, SET_FOOTER = 46;
+const int SET_BOX_X = 210, SET_BOX_W = 170, SET_BOX_H = 24;
 
 // Текущее преобразование мир -> клиент миникарты
 struct MapXform { double s; LONG ox, oy; RECT bounds; };
@@ -414,6 +424,11 @@ static void UpdateThumbs(const RECT& client) {
     }
 }
 
+// Кнопка-шестерёнка в правом-верхнем углу миникарты
+static RECT GearRect(const RECT& client) {
+    return { client.right - 28, 4, client.right - 6, 26 };
+}
+
 // ---------- Отрисовка миникарты (фон, бордюры, вьюпорт) ----------
 // DWM рисует превью ПОВЕРХ этого GDI-содержимого, поэтому бордюры окон
 // делаем чуть шире рамки превью, а рамку вьюпорта — поверх пустых зон.
@@ -465,8 +480,17 @@ static void DrawMinimap(HDC hdc, const RECT& client) {
 
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, RGB(150, 160, 175));
-    const wchar_t* tip = L"ЛКМ — перелёт   Ctrl+Alt+стрелки — панорама";
+    const wchar_t* tip = L"ЛКМ — перелёт   ⚙ — настройка клавиш";
     TextOutW(hdc, 10, client.bottom - 18, tip, lstrlenW(tip));
+
+    // шестерёнка (настройки горячих клавиш)
+    static HFONT gearFont = CreateFontW(20, 0, 0, 0, FW_NORMAL, 0, 0, 0,
+        DEFAULT_CHARSET, 0, 0, 0, 0, L"Segoe UI Symbol");
+    RECT gr = GearRect(client);
+    HGDIOBJ of = SelectObject(hdc, gearFont);
+    SetTextColor(hdc, RGB(180, 190, 205));
+    DrawTextW(hdc, L"⚙", -1, &gr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(hdc, of);
 }
 
 // ---------- Привязка холста на уровень обоев ----------
@@ -947,6 +971,199 @@ static LRESULT CALLBACK OvProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
+// ---------- Настраиваемые горячие клавиши ----------
+static void InitDefaultKeys() {
+    g_keys[HK_LEFT]    = { MOD_CONTROL | MOD_ALT, VK_LEFT,  L"Панорама влево" };
+    g_keys[HK_RIGHT]   = { MOD_CONTROL | MOD_ALT, VK_RIGHT, L"Панорама вправо" };
+    g_keys[HK_UP]      = { MOD_CONTROL | MOD_ALT, VK_UP,    L"Панорама вверх" };
+    g_keys[HK_DOWN]    = { MOD_CONTROL | MOD_ALT, VK_DOWN,  L"Панорама вниз" };
+    g_keys[HK_HOME]    = { MOD_CONTROL | MOD_ALT, 'H',      L"Домой (камера 0,0)" };
+    g_keys[HK_MAP]     = { MOD_CONTROL | MOD_ALT, 'M',      L"Миникарта вкл/выкл" };
+    g_keys[HK_REFRESH] = { MOD_CONTROL | MOD_ALT, 'R',      L"Пересобрать окна" };
+    g_keys[HK_QUIT]    = { MOD_CONTROL | MOD_ALT, 'Q',      L"Выход" };
+    g_keys[HK_PREVIEW] = { MOD_CONTROL | MOD_ALT, 'P',      L"Превью вкл/выкл" };
+    g_keys[HK_PIN]     = { MOD_CONTROL | MOD_ALT, 'F',      L"Закрепить окно" };
+}
+
+static void RegisterAllHotkeys() {
+    for (int id = HK_LEFT; id <= HK_PIN; ++id)
+        RegisterHotKey(g_hud, id, g_keys[id].mods, g_keys[id].vk);
+}
+static void UnregisterAllHotkeys() {
+    for (int id = HK_LEFT; id <= HK_PIN; ++id) UnregisterHotKey(g_hud, id);
+}
+
+static std::wstring HotkeysPath() {
+    wchar_t buf[MAX_PATH] = {};
+    DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH);
+    std::wstring dir = (n && n < MAX_PATH) ? std::wstring(buf) : L".";
+    dir += L"\\InfiniteDesktop";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    return dir + L"\\hotkeys.txt";
+}
+static void SaveHotkeys() {
+    std::ofstream f(HotkeysPath().c_str(), std::ios::binary | std::ios::trunc);
+    if (!f) return;
+    for (int id = HK_LEFT; id <= HK_PIN; ++id) {
+        std::string line = std::to_string(id) + " " + std::to_string(g_keys[id].mods)
+                         + " " + std::to_string(g_keys[id].vk) + "\n";
+        f.write(line.data(), (std::streamsize)line.size());
+    }
+}
+static void LoadHotkeys() {
+    std::ifstream f(HotkeysPath().c_str(), std::ios::binary);
+    if (!f) return;
+    std::string line;
+    while (std::getline(f, line)) {
+        std::istringstream iss(line);
+        int id, mods, vk;
+        if ((iss >> id >> mods >> vk) && id >= HK_LEFT && id <= HK_PIN) {
+            g_keys[id].mods = (UINT)mods;
+            g_keys[id].vk   = (UINT)vk;
+        }
+    }
+}
+
+static std::wstring KeyName(UINT vk) {
+    switch (vk) {
+        case VK_LEFT:  return L"←"; case VK_RIGHT: return L"→";
+        case VK_UP:    return L"↑"; case VK_DOWN:  return L"↓";
+        case VK_SPACE: return L"Space"; case VK_RETURN: return L"Enter";
+    }
+    if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) {
+        wchar_t c[2] = { (wchar_t)vk, 0 }; return c;
+    }
+    UINT sc = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+    bool ext = (vk == VK_PRIOR || vk == VK_NEXT || vk == VK_HOME || vk == VK_END ||
+                vk == VK_INSERT || vk == VK_DELETE);
+    LONG lp = (LONG)(sc << 16);
+    if (ext) lp |= (1 << 24);
+    wchar_t buf[64] = {};
+    if (sc && GetKeyNameTextW(lp, buf, 64) > 0) return buf;
+    wchar_t b[16]; wsprintfW(b, L"VK_%02X", vk); return b;
+}
+static std::wstring KeyComboText(UINT mods, UINT vk) {
+    std::wstring s;
+    if (mods & MOD_CONTROL) s += L"Ctrl+";
+    if (mods & MOD_ALT)     s += L"Alt+";
+    if (mods & MOD_SHIFT)   s += L"Shift+";
+    if (mods & MOD_WIN)     s += L"Win+";
+    s += KeyName(vk);
+    return s;
+}
+
+static bool IsModifierVk(UINT vk) {
+    return vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU ||
+           vk == VK_LWIN || vk == VK_RWIN ||
+           vk == VK_LSHIFT || vk == VK_RSHIFT || vk == VK_LCONTROL ||
+           vk == VK_RCONTROL || vk == VK_LMENU || vk == VK_RMENU || vk == VK_CAPITAL;
+}
+static UINT CurrentMods() {
+    UINT m = 0;
+    if (GetKeyState(VK_CONTROL) & 0x8000) m |= MOD_CONTROL;
+    if (GetKeyState(VK_MENU)    & 0x8000) m |= MOD_ALT;
+    if (GetKeyState(VK_SHIFT)   & 0x8000) m |= MOD_SHIFT;
+    if ((GetKeyState(VK_LWIN) & 0x8000) || (GetKeyState(VK_RWIN) & 0x8000)) m |= MOD_WIN;
+    return m;
+}
+
+static int SetFooterY() { return SET_HEADER + (HK_PIN - HK_LEFT + 1) * SET_ROW + 10; }
+
+static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_ERASEBKGND: return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps; HDC dc = BeginPaint(hwnd, &ps);
+        RECT rc; GetClientRect(hwnd, &rc);
+        HDC h = CreateCompatibleDC(dc);
+        HBITMAP bmp = CreateCompatibleBitmap(dc, rc.right, rc.bottom);
+        HGDIOBJ ob = SelectObject(h, bmp);
+        HBRUSH bg = CreateSolidBrush(RGB(28, 30, 36)); FillRect(h, &rc, bg); DeleteObject(bg);
+        SetBkMode(h, TRANSPARENT);
+        SetTextColor(h, RGB(210, 215, 225));
+        RECT hr = { 14, 10, rc.right - 14, SET_HEADER };
+        DrawTextW(h, L"Горячие клавиши\nКлик по сочетанию → нажмите новое (Esc — отмена)",
+                  -1, &hr, DT_LEFT | DT_NOPREFIX);
+        for (int id = HK_LEFT; id <= HK_PIN; ++id) {
+            int y = SET_HEADER + (id - HK_LEFT) * SET_ROW;
+            SetTextColor(h, RGB(190, 196, 208));
+            RECT nr = { 14, y, SET_BOX_X - 6, y + SET_ROW };
+            DrawTextW(h, g_keys[id].name, -1, &nr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            RECT box = { SET_BOX_X, y + 2, SET_BOX_X + SET_BOX_W, y + 2 + SET_BOX_H };
+            bool cap = (g_capRow == id);
+            HBRUSH bb = CreateSolidBrush(cap ? RGB(60, 80, 120) : RGB(44, 47, 56));
+            FillRect(h, &box, bb); DeleteObject(bb);
+            FrameRect(h, &box, (HBRUSH)GetStockObject(GRAY_BRUSH));
+            SetTextColor(h, cap ? RGB(255, 230, 140) : RGB(220, 225, 235));
+            std::wstring t = cap ? L"нажмите клавиши…" : KeyComboText(g_keys[id].mods, g_keys[id].vk);
+            DrawTextW(h, t.c_str(), -1, &box, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        }
+        RECT fr = { 14, SetFooterY(), rc.right - 14, SetFooterY() + 24 };
+        SetTextColor(h, RGB(140, 170, 230));
+        DrawTextW(h, L"Сбросить по умолчанию", -1, &fr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        BitBlt(dc, 0, 0, rc.right, rc.bottom, h, 0, 0, SRCCOPY);
+        SelectObject(h, ob); DeleteObject(bmp); DeleteDC(h);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_LBUTTONDOWN: {
+        int x = (short)LOWORD(lp), y = (short)HIWORD(lp);
+        // сброс по умолчанию
+        if (y >= SetFooterY() && y <= SetFooterY() + 24 && x >= 14 && x < 220) {
+            InitDefaultKeys();
+            UnregisterAllHotkeys(); RegisterAllHotkeys(); SaveHotkeys();
+            g_capRow = -1; InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        g_capRow = -1;
+        for (int id = HK_LEFT; id <= HK_PIN; ++id) {
+            int by = SET_HEADER + (id - HK_LEFT) * SET_ROW + 2;
+            if (x >= SET_BOX_X && x <= SET_BOX_X + SET_BOX_W && y >= by && y <= by + SET_BOX_H) {
+                g_capRow = id; break;
+            }
+        }
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    }
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN: {
+        if (g_capRow < 0) break;
+        UINT vk = (UINT)wp;
+        if (vk == VK_ESCAPE) { g_capRow = -1; InvalidateRect(hwnd, nullptr, FALSE); return 0; }
+        if (IsModifierVk(vk)) return 0;
+        UINT mods = CurrentMods();
+        if (mods == 0) return 0;             // требуем хотя бы один модификатор
+        g_keys[g_capRow].mods = mods;
+        g_keys[g_capRow].vk   = vk;
+        g_capRow = -1;
+        UnregisterAllHotkeys(); RegisterAllHotkeys(); SaveHotkeys();
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    }
+    case WM_CLOSE:
+        g_capRow = -1;
+        ShowWindow(hwnd, SW_HIDE);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+// Открыть/закрыть окно настроек (по клику на шестерёнке).
+static void OpenSettings() {
+    if (!g_settings) return;
+    if (IsWindowVisible(g_settings)) { ShowWindow(g_settings, SW_HIDE); return; }
+    RECT cr = { 0, 0, SET_W, SetFooterY() + SET_FOOTER };
+    DWORD style = (DWORD)GetWindowLongW(g_settings, GWL_STYLE);
+    AdjustWindowRect(&cr, style, FALSE);
+    RECT hr; GetWindowRect(g_hud, &hr);
+    int w = cr.right - cr.left, hgt = cr.bottom - cr.top;
+    int x = hr.right - w, yy = hr.bottom + 6;
+    SetWindowPos(g_settings, HWND_TOPMOST, x, yy, w, hgt, SWP_SHOWWINDOW);
+    SetForegroundWindow(g_settings);
+    g_capRow = -1;
+    InvalidateRect(g_settings, nullptr, TRUE);
+}
+
 // ---------- Оконная процедура HUD ----------
 static LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
@@ -967,8 +1184,14 @@ static LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_LBUTTONDOWN: {
         RECT rc; GetClientRect(hwnd, &rc);
+        int mx = (short)LOWORD(lp), my = (short)HIWORD(lp);
+        RECT gr = GearRect(rc);
+        if (mx >= gr.left && mx <= gr.right && my >= gr.top && my <= gr.bottom) {
+            OpenSettings();   // клик по шестерёнке — настройки клавиш
+            return 0;
+        }
         ComputeXform(rc);
-        double wx, wy; MapToWorld(LOWORD(lp), HIWORD(lp), wx, wy);
+        double wx, wy; MapToWorld(mx, my, wx, wy);
         CenterOn(wx, wy);
         return 0;
     }
@@ -988,6 +1211,14 @@ static LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == SPI_SETDESKWALLPAPER) LoadWallpaper();   // пользователь сменил обои
         break;
     case WM_HOTKEY: {
+        if (g_capRow >= HK_LEFT) {   // окно настроек ждёт сочетание — перехватываем
+            g_keys[g_capRow].mods = LOWORD(lp);
+            g_keys[g_capRow].vk   = HIWORD(lp);
+            g_capRow = -1;
+            UnregisterAllHotkeys(); RegisterAllHotkeys(); SaveHotkeys();
+            if (g_settings) InvalidateRect(g_settings, nullptr, FALSE);
+            return 0;
+        }
         switch (wp) {
         case HK_LEFT:    PanBy(-PAN_STEP, 0); break;
         case HK_RIGHT:   PanBy( PAN_STEP, 0); break;
@@ -998,7 +1229,11 @@ static LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case HK_MAP:
             g_hudVisible = !g_hudVisible;
             if (g_hudVisible) { RegisterAllThumbs(); ShowWindow(g_hud, SW_SHOWNA); }
-            else              { UnregisterAllThumbs(); ShowWindow(g_hud, SW_HIDE); }
+            else {
+                UnregisterAllThumbs();
+                ShowWindow(g_hud, SW_HIDE);
+                if (g_settings) ShowWindow(g_settings, SW_HIDE);  // шестерёнка скрывается с картой
+            }
             break;
         case HK_PREVIEW:
             g_previewsOn = !g_previewsOn;
@@ -1415,16 +1650,22 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         px, py, mapW, mapH,
         nullptr, nullptr, hInst, nullptr);
 
-    RegisterHotKey(g_hud, HK_LEFT,    MOD_CONTROL | MOD_ALT, VK_LEFT);
-    RegisterHotKey(g_hud, HK_RIGHT,   MOD_CONTROL | MOD_ALT, VK_RIGHT);
-    RegisterHotKey(g_hud, HK_UP,      MOD_CONTROL | MOD_ALT, VK_UP);
-    RegisterHotKey(g_hud, HK_DOWN,    MOD_CONTROL | MOD_ALT, VK_DOWN);
-    RegisterHotKey(g_hud, HK_HOME,    MOD_CONTROL | MOD_ALT, 'H');
-    RegisterHotKey(g_hud, HK_MAP,     MOD_CONTROL | MOD_ALT, 'M');
-    RegisterHotKey(g_hud, HK_REFRESH, MOD_CONTROL | MOD_ALT, 'R');
-    RegisterHotKey(g_hud, HK_QUIT,    MOD_CONTROL | MOD_ALT, 'Q');
-    RegisterHotKey(g_hud, HK_PREVIEW, MOD_CONTROL | MOD_ALT, 'P');
-    RegisterHotKey(g_hud, HK_PIN,     MOD_CONTROL | MOD_ALT, 'F');
+    // Окно настроек горячих клавиш (скрыто; открывается по шестерёнке)
+    WNDCLASSW stc = {};
+    stc.lpfnWndProc = SettingsProc;
+    stc.hInstance = hInst;
+    stc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    stc.lpszClassName = L"InfiniteDesktopSettings";
+    RegisterClassW(&stc);
+    g_settings = CreateWindowExW(
+        WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+        stc.lpszClassName, L"Горячие клавиши",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU,
+        120, 120, SET_W, 460, nullptr, nullptr, hInst, nullptr);
+
+    InitDefaultKeys();      // значения по умолчанию
+    LoadHotkeys();          // переопределение из файла (если есть)
+    RegisterAllHotkeys();   // зарегистрировать все
 
     RebuildWindowList();
     LoadLayout();          // прошлая раскладка (если есть)
@@ -1506,6 +1747,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     if (g_blackDC) DeleteDC(g_blackDC);
     if (g_blackBmp) DeleteObject(g_blackBmp);
     if (g_gdiToken) Gdiplus::GdiplusShutdown(g_gdiToken);
+    if (g_settings) DestroyWindow(g_settings);
     if (g_ov)      DestroyWindow(g_ov);
     if (g_bg)      DestroyWindow(g_bg);
     return 0;
