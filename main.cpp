@@ -47,7 +47,8 @@
 // ---------- Состояние ----------
 struct TrackedWin {
     HWND       hwnd;
-    RECT       world;            // позиция/размер в координатах мира
+    RECT       world;            // позиция/размер в координатах мира (по GetWindowRect)
+    RECT       vm;               // отступы до видимых границ окна (невидимые рамки DWM)
     HTHUMBNAIL thumb;            // живое DWM-превью на миникарте (или nullptr)
     HTHUMBNAIL thumbOv;          // живое DWM-превью в полноэкранном обзоре (зум)
 };
@@ -160,6 +161,18 @@ static bool IsManageable(HWND h) {
     return true;
 }
 
+// Отступы от GetWindowRect до видимых границ окна (невидимые рамки изменения размера).
+static RECT ComputeVM(HWND h, const RECT& r) {
+    RECT ext;
+    if (SUCCEEDED(DwmGetWindowAttribute(h, DWMWA_EXTENDED_FRAME_BOUNDS, &ext, sizeof(ext)))) {
+        RECT m = { ext.left - r.left, ext.top - r.top, r.right - ext.right, r.bottom - ext.bottom };
+        if (m.left < 0) m.left = 0;   if (m.top < 0) m.top = 0;
+        if (m.right < 0) m.right = 0; if (m.bottom < 0) m.bottom = 0;
+        return m;
+    }
+    return { 0, 0, 0, 0 };
+}
+
 static BOOL CALLBACK EnumProc(HWND h, LPARAM) {
     if (!IsManageable(h)) return TRUE;
     RECT r;
@@ -169,6 +182,7 @@ static BOOL CALLBACK EnumProc(HWND h, LPARAM) {
     w.hwnd    = h;
     w.thumb   = nullptr;
     w.thumbOv = nullptr;
+    w.vm      = ComputeVM(h, r);
     w.world.left   = r.left   + cx;
     w.world.top    = r.top    + cy;
     w.world.right  = r.right  + cx;
@@ -275,6 +289,7 @@ static BOOL CALLBACK AddNewProc(HWND h, LPARAM) {
     w.hwnd    = h;
     w.thumb   = nullptr;
     w.thumbOv = nullptr;
+    w.vm      = ComputeVM(h, r);
     w.world.left   = r.left   + cx;
     w.world.top    = r.top    + cy;
     w.world.right  = r.right  + cx;
@@ -659,6 +674,13 @@ static LRESULT CALLBACK MouseProc(int code, WPARAM wp, LPARAM lp) {
 static double OvClientX(double wx) { return g_axCX + (wx - g_axWX) * g_zoom; }
 static double OvClientY(double wy) { return g_axCY + (wy - g_axWY) * g_zoom; }
 
+// Видимый мировой прямоугольник окна (без невидимых рамок) — для превью/теней/клика,
+// чтобы зазоры в обзоре совпадали с холстом.
+static RECT VisWorld(const TrackedWin& w) {
+    return { w.world.left + w.vm.left,  w.world.top + w.vm.top,
+             w.world.right - w.vm.right, w.world.bottom - w.vm.bottom };
+}
+
 static void ShowOverview() {
     if (g_overview) return;
     g_ovLastZoom = -1;   // форсировать первую перерисовку
@@ -688,8 +710,9 @@ static void UpdateOverview() {
     if (!g_overview) return;
     for (auto& w : g_wins) {
         if (!w.thumbOv) continue;
-        RECT d = { (LONG)llround(OvClientX(w.world.left)),  (LONG)llround(OvClientY(w.world.top)),
-                   (LONG)llround(OvClientX(w.world.right)), (LONG)llround(OvClientY(w.world.bottom)) };
+        RECT vw = VisWorld(w);
+        RECT d = { (LONG)llround(OvClientX(vw.left)),  (LONG)llround(OvClientY(vw.top)),
+                   (LONG)llround(OvClientX(vw.right)), (LONG)llround(OvClientY(vw.bottom)) };
         DWM_THUMBNAIL_PROPERTIES p = {};
         p.dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE |
                     DWM_TNP_OPACITY | DWM_TNP_SOURCECLIENTAREAONLY;
@@ -813,8 +836,9 @@ static void DrawOverview(HDC hdc, const RECT& client) {
     int radius = (int)(8.0 * g_zoom + 0.5);
     if (radius < 2) radius = 2;
     for (auto& w : g_wins) {
-        RECT d = { (LONG)llround(OvClientX(w.world.left)),  (LONG)llround(OvClientY(w.world.top)),
-                   (LONG)llround(OvClientX(w.world.right)), (LONG)llround(OvClientY(w.world.bottom)) };
+        RECT vw = VisWorld(w);
+        RECT d = { (LONG)llround(OvClientX(vw.left)),  (LONG)llround(OvClientY(vw.top)),
+                   (LONG)llround(OvClientX(vw.right)), (LONG)llround(OvClientY(vw.bottom)) };
         if (d.right <= d.left || d.bottom <= d.top) continue;
         DrawShadow(hdc, d, radius);
     }
@@ -846,8 +870,9 @@ static LRESULT CALLBACK OvProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_ovDragHwnd = nullptr;
         for (HWND h : g_ovZ) {
             for (auto& w : g_wins) if (w.hwnd == h) {
-                double l = OvClientX(w.world.left),  t = OvClientY(w.world.top);
-                double r = OvClientX(w.world.right), b = OvClientY(w.world.bottom);
+                RECT vw = VisWorld(w);
+                double l = OvClientX(vw.left),  t = OvClientY(vw.top);
+                double r = OvClientX(vw.right), b = OvClientY(vw.bottom);
                 if (cx >= l && cx <= r && cy >= t && cy <= b) g_ovDragHwnd = h;
                 break;
             }
