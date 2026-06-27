@@ -1058,15 +1058,15 @@ static BOOL g_prevWinArranging = TRUE;
 
 static void DisableSnap() {
     g_prevWinArranging = TRUE;
-    SystemParametersInfoW(SPI_GETWINARRANGING, 0, &g_prevWinArranging, 0);
+    SystemParametersInfoW(SPI_GETWINARRANGING, 0, &g_prevWinArranging, 0);  // GET — в pvParam
     if (g_prevWinArranging)
-        SystemParametersInfoW(SPI_SETWINARRANGING, 0, (PVOID)FALSE, SPIF_SENDCHANGE);
+        // SET — значение в uiParam (FALSE = выключить)
+        SystemParametersInfoW(SPI_SETWINARRANGING, FALSE, nullptr, SPIF_SENDCHANGE);
 }
 
 static void RestoreSnap() {
     if (g_prevWinArranging)   // вернуть, только если изначально был включён
-        SystemParametersInfoW(SPI_SETWINARRANGING, 0,
-                              (PVOID)(INT_PTR)g_prevWinArranging, SPIF_SENDCHANGE);
+        SystemParametersInfoW(SPI_SETWINARRANGING, TRUE, nullptr, SPIF_SENDCHANGE);
 }
 
 // Включить осведомлённость о DPI на уровне монитора (для точных координат
