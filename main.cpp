@@ -66,6 +66,7 @@ static HWND g_hud = nullptr;                    // окно миникарты
 static bool g_hudVisible = true;
 static bool g_previewsOn = true;                // живые DWM-превью на миникарте
 static int  g_corner = 1;                       // угол миникарты: 0=ЛВ,1=ПВ,2=ЛН,3=ПН
+static bool g_hudDrag = false;                  // зажата ЛКМ на миникарте (перетаскивание)
 const int   MAP_W = 420, MAP_H = 260, MAP_MARGIN = 16;
 const BYTE  HUD_ALPHA = 224, SETTINGS_ALPHA = 238;  // полупрозрачность
 static int  g_syncCounter = 0;
@@ -134,6 +135,8 @@ static ULONG_PTR g_gdiToken = 0;
 static HDC     g_wallDC = nullptr;
 static HBITMAP g_wallBmp = nullptr;
 static int     g_wallW = 0, g_wallH = 0;
+static std::wstring g_wallPath;          // путь загруженных обоев (для отслеживания смены)
+static DWORD g_lastWallCap = 0;          // время последнего перечитывания обоев в обзоре
 static HDC     g_blackDC = nullptr;       // 1x1 чёрный для мягких теней (AlphaBlend)
 static HBITMAP g_blackBmp = nullptr;
 // Троттлинг перерисовки обзора (не каждый кадр, только при изменениях)
@@ -736,8 +739,11 @@ static RECT VisWorld(const TrackedWin& w) {
              w.world.right - w.vm.right, w.world.bottom - w.vm.bottom };
 }
 
+static void LoadWallpaper();   // определена ниже
+
 static void ShowOverview() {
     if (g_overview) return;
+    LoadWallpaper(); g_lastWallCap = GetTickCount();  // актуальные обои на входе
     g_ovLastZoom = -1;   // форсировать первую перерисовку
     RegisterAllOvThumbs();
     SetWindowPos(g_ov, HWND_TOPMOST, g_vsX, g_vsY, g_vsW, g_vsH, SWP_NOACTIVATE);
@@ -820,9 +826,9 @@ static void LoadWallpaper() {
     g_wallW = g_wallH = 0;
 
     wchar_t path[MAX_PATH] = {};
-    if (!SystemParametersInfoW(SPI_GETDESKWALLPAPER, MAX_PATH, path, 0) || !path[0]) return;
+    if (!SystemParametersInfoW(SPI_GETDESKWALLPAPER, MAX_PATH, path, 0) || !path[0]) { g_wallPath.clear(); return; }
     Gdiplus::Bitmap img(path);
-    if (img.GetLastStatus() != Gdiplus::Ok) return;
+    if (img.GetLastStatus() != Gdiplus::Ok) { g_wallPath.clear(); return; }
 
     HDC screen = GetDC(nullptr);
     g_wallDC  = CreateCompatibleDC(screen);
@@ -842,6 +848,7 @@ static void LoadWallpaper() {
         EnumDisplayMonitors(nullptr, nullptr, WallMonProc, (LPARAM)&ctx);
     }
     g_wallW = g_vsW; g_wallH = g_vsH;
+    g_wallPath = path;
 }
 
 static void EnsureBlack() {
@@ -1276,9 +1283,22 @@ static LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             OpenSettings();   // клик по шестерёнке — настройки клавиш
             return 0;
         }
+        SetCapture(hwnd); g_hudDrag = true;   // зажать и тащить — камера следует за курсором
         ComputeXform(rc);
         double wx, wy; MapToWorld(mx, my, wx, wy);
         CenterOn(wx, wy);
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        if (!g_hudDrag || GetCapture() != hwnd) return 0;
+        RECT rc; GetClientRect(hwnd, &rc);
+        ComputeXform(rc);
+        double wx, wy; MapToWorld((short)LOWORD(lp), (short)HIWORD(lp), wx, wy);
+        CenterOn(wx, wy);   // обновляем цель — камера непрерывно едет за курсором
+        return 0;
+    }
+    case WM_LBUTTONUP: {
+        if (g_hudDrag) { g_hudDrag = false; if (GetCapture() == hwnd) ReleaseCapture(); }
         return 0;
     }
     case WM_DISPLAYCHANGE: {
@@ -1647,6 +1667,13 @@ static void FrameTick(double dt) {
             HideOverview();
             // дальше — обычная логика (окна уже расставлены)
         } else {
+            // периодически перечитываем обои (слайдшоу/смена в реальном времени),
+            // когда зум устаканился — чтобы не дёргать кадры во время анимации
+            if (fabs(g_zoomTarget - g_zoom) < 0.001 && GetTickCount() - g_lastWallCap >= 1500) {
+                g_lastWallCap = GetTickCount();
+                LoadWallpaper();
+                InvalidateRect(g_ov, nullptr, FALSE);
+            }
             // перерисовываем обзор только при изменениях (зум/панорама/перетаскивание)
             bool ovChanged = (g_zoom != g_ovLastZoom || g_axCX != g_ovLastAxCX ||
                               g_axCY != g_ovLastAxCY || g_axWX != g_ovLastAxWX ||
