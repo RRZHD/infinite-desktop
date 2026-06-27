@@ -65,6 +65,9 @@ static int  g_vsX = 0, g_vsY = 0, g_vsW = 0, g_vsH = 0;
 static HWND g_hud = nullptr;                    // окно миникарты
 static bool g_hudVisible = true;
 static bool g_previewsOn = true;                // живые DWM-превью на миникарте
+static int  g_corner = 1;                       // угол миникарты: 0=ЛВ,1=ПВ,2=ЛН,3=ПН
+const int   MAP_W = 420, MAP_H = 260, MAP_MARGIN = 16;
+const BYTE  HUD_ALPHA = 224, SETTINGS_ALPHA = 238;  // полупрозрачность
 static int  g_syncCounter = 0;
 static DWORD g_lastHudTick = 0, g_lastSyncTick = 0;  // троттлинг миникарты/синхронизации по времени
 
@@ -83,7 +86,7 @@ static HWND g_settings = nullptr;    // окно настроек горячих
 static int  g_capRow = -1;           // строка в режиме перехвата клавиш (или -1)
 static std::wstring g_status;        // сообщение в окне настроек (конфликт и т.п.)
 // Геометрия окна настроек
-const int SET_W = 400, SET_HEADER = 52, SET_ROW = 30, SET_FOOTER = 46;
+const int SET_W = 400, SET_HEADER = 52, SET_ROW = 30, SET_FOOTER = 90;
 const int SET_BOX_X = 210, SET_BOX_W = 170, SET_BOX_H = 24;
 
 // Текущее преобразование мир -> клиент миникарты
@@ -425,6 +428,8 @@ static void UpdateThumbs(const RECT& client) {
     }
 }
 
+static HFONT UiFont();   // системный шрифт Win11 (определён ниже)
+
 // Кнопка-шестерёнка в правом-верхнем углу миникарты
 static RECT GearRect(const RECT& client) {
     return { client.right - 28, 4, client.right - 6, 26 };
@@ -445,8 +450,7 @@ static void DrawMinimap(HDC hdc, const RECT& client) {
     HPEN framePen = CreatePen(PS_SOLID, 1, RGB(90, 110, 140));
     HBRUSH fillBr = CreateSolidBrush(RGB(70, 130, 200));
     HGDIOBJ oldPen = SelectObject(hdc, framePen);
-    HGDIOBJ oldBr  = SelectObject(hdc, g_previewsOn ? GetStockObject(NULL_BRUSH)
-                                                    : (HGDIOBJ)fillBr);
+    HGDIOBJ oldBr  = SelectObject(hdc, (HGDIOBJ)fillBr);   // всегда закрашенные (полупрозрачное окно)
     for (auto& w : g_wins) {
         RECT m = WorldToClient(w.world);
         InflateRect(&m, 1, 1);
@@ -480,9 +484,11 @@ static void DrawMinimap(HDC hdc, const RECT& client) {
     DeleteObject(pinPen);
 
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, RGB(150, 160, 175));
-    const wchar_t* tip = L"ЛКМ — перелёт   ⚙ — настройка клавиш";
-    TextOutW(hdc, 10, client.bottom - 18, tip, lstrlenW(tip));
+    HGDIOBJ oldFont = SelectObject(hdc, UiFont());
+    SetTextColor(hdc, RGB(175, 185, 200));
+    const wchar_t* tip = L"ЛКМ — перелёт · ⚙ — настройки";
+    TextOutW(hdc, 12, client.bottom - 22, tip, lstrlenW(tip));
+    SelectObject(hdc, oldFont);
 
     // шестерёнка (настройки горячих клавиш)
     static HFONT gearFont = CreateFontW(20, 0, 0, 0, FW_NORMAL, 0, 0, 0,
@@ -972,6 +978,53 @@ static LRESULT CALLBACK OvProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
+// ---------- Стиль Win11, шрифт, размещение миникарты ----------
+static HFONT UiFont() {
+    static HFONT f = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Variable Text");
+    return f;
+}
+
+// Тёмный заголовок и скруглённые углы (Windows 11)
+static void ApplyWin11Style(HWND hwnd) {
+    BOOL dark = TRUE;
+    DwmSetWindowAttribute(hwnd, 20 /*USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof(dark));
+    int round = 2 /*DWMWCP_ROUND*/;
+    DwmSetWindowAttribute(hwnd, 33 /*WINDOW_CORNER_PREFERENCE*/, &round, sizeof(round));
+}
+
+static std::wstring UiCfgPath() {
+    wchar_t buf[MAX_PATH] = {};
+    DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH);
+    std::wstring dir = (n && n < MAX_PATH) ? std::wstring(buf) : L".";
+    dir += L"\\InfiniteDesktop";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    return dir + L"\\ui.txt";
+}
+static void SaveUiCfg() {
+    std::ofstream f(UiCfgPath().c_str(), std::ios::binary | std::ios::trunc);
+    if (f) { std::string s = "corner " + std::to_string(g_corner) + "\n"; f.write(s.data(), s.size()); }
+}
+static void LoadUiCfg() {
+    std::ifstream f(UiCfgPath().c_str(), std::ios::binary);
+    if (!f) return;
+    std::string key; int v;
+    while (f >> key >> v) if (key == "corner" && v >= 0 && v <= 3) g_corner = v;
+}
+
+// Разместить миникарту в выбранном углу рабочей области основного монитора.
+static void PlaceHud() {
+    if (!g_hud) return;
+    RECT wa; SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+    int x = (g_corner == 0 || g_corner == 2) ? wa.left + MAP_MARGIN : wa.right - MAP_W - MAP_MARGIN;
+    int y = (g_corner == 0 || g_corner == 1) ? wa.top + MAP_MARGIN  : wa.bottom - MAP_H - MAP_MARGIN;
+    SetWindowPos(g_hud, HWND_TOPMOST, x, y, MAP_W, MAP_H, SWP_NOACTIVATE);
+}
+static const wchar_t* CornerGlyph() {
+    switch (g_corner) { case 0: return L"↖"; case 1: return L"↗"; case 2: return L"↙"; default: return L"↘"; }
+}
+
 // ---------- Настраиваемые горячие клавиши ----------
 static void InitDefaultKeys() {
     g_keys[HK_LEFT]    = { MOD_CONTROL | MOD_ALT, VK_LEFT,  L"Панорама влево" };
@@ -1086,8 +1139,9 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
         HDC h = CreateCompatibleDC(dc);
         HBITMAP bmp = CreateCompatibleBitmap(dc, rc.right, rc.bottom);
         HGDIOBJ ob = SelectObject(h, bmp);
-        HBRUSH bg = CreateSolidBrush(RGB(28, 30, 36)); FillRect(h, &rc, bg); DeleteObject(bg);
+        HBRUSH bg = CreateSolidBrush(RGB(24, 26, 32)); FillRect(h, &rc, bg); DeleteObject(bg);
         SetBkMode(h, TRANSPARENT);
+        HGDIOBJ oldF = SelectObject(h, UiFont());
         SetTextColor(h, RGB(210, 215, 225));
         RECT hr = { 14, 10, rc.right - 14, SET_HEADER };
         DrawTextW(h, L"Горячие клавиши\nКлик по сочетанию → нажмите новое (Esc — отмена)",
@@ -1109,12 +1163,17 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
         RECT fr = { 14, SetFooterY(), rc.right - 14, SetFooterY() + 24 };
         SetTextColor(h, RGB(140, 170, 230));
         DrawTextW(h, L"Сбросить по умолчанию", -1, &fr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        RECT crn = { 14, SetFooterY() + 28, rc.right - 14, SetFooterY() + 52 };
+        SetTextColor(h, RGB(190, 196, 208));
+        std::wstring ct = std::wstring(L"Угол миникарты: ") + CornerGlyph() + L"   (клик — сменить)";
+        DrawTextW(h, ct.c_str(), -1, &crn, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         if (!g_status.empty()) {
-            RECT sr = { 14, SetFooterY() + 22, rc.right - 14, SetFooterY() + 44 };
+            RECT sr = { 14, SetFooterY() + 56, rc.right - 14, SetFooterY() + 78 };
             SetTextColor(h, RGB(255, 180, 90));
             DrawTextW(h, g_status.c_str(), -1, &sr,
                       DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
         }
+        SelectObject(h, oldF);
         BitBlt(dc, 0, 0, rc.right, rc.bottom, h, 0, 0, SRCCOPY);
         SelectObject(h, ob); DeleteObject(bmp); DeleteDC(h);
         EndPaint(hwnd, &ps);
@@ -1126,6 +1185,13 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
         if (y >= SetFooterY() && y <= SetFooterY() + 24 && x >= 14 && x < 220) {
             InitDefaultKeys();
             UnregisterAllHotkeys(); RegisterAllHotkeys(); SaveHotkeys();
+            g_capRow = -1; g_status.clear(); InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        // смена угла миникарты
+        if (y >= SetFooterY() + 28 && y <= SetFooterY() + 52 && x >= 14) {
+            g_corner = (g_corner + 1) % 4;
+            PlaceHud(); SaveUiCfg();
             g_capRow = -1; g_status.clear(); InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
@@ -1219,6 +1285,7 @@ static LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // изменилась конфигурация мониторов
         UpdateVirtualScreen();
         LoadWallpaper();                        // перерисовать обои под новое разрешение
+        PlaceHud();                             // миникарта — в свой угол новой раскладки
         PlaceBackdrop();
         g_bgLastCamX = (LONG)llround(g_camX);   // подложка перерисована целиком
         g_bgLastCamY = (LONG)llround(g_camY);
@@ -1664,16 +1731,16 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     wc.lpszClassName = L"InfiniteDesktopHUD";
     RegisterClassW(&wc);
 
-    int mapW = 420, mapH = 260, margin = 16;
-    // правый-верхний угол основного монитора (виртуальные координаты)
-    int px = g_vsX + g_vsW - mapW - margin;
-    int py = g_vsY + margin;
     g_hud = CreateWindowExW(
-        WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+        WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED,
         wc.lpszClassName, L"InfiniteDesktop",
         WS_POPUP | WS_VISIBLE,
-        px, py, mapW, mapH,
+        0, 0, MAP_W, MAP_H,
         nullptr, nullptr, hInst, nullptr);
+    SetLayeredWindowAttributes(g_hud, 0, HUD_ALPHA, LWA_ALPHA);  // полупрозрачность
+    ApplyWin11Style(g_hud);
+    LoadUiCfg();   // сохранённый угол миникарты
+    PlaceHud();    // разместить в выбранном углу
 
     // Окно настроек горячих клавиш (скрыто; открывается по шестерёнке)
     WNDCLASSW stc = {};
@@ -1683,10 +1750,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     stc.lpszClassName = L"InfiniteDesktopSettings";
     RegisterClassW(&stc);
     g_settings = CreateWindowExW(
-        WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+        WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED,
         stc.lpszClassName, L"Горячие клавиши",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        120, 120, SET_W, 460, nullptr, nullptr, hInst, nullptr);
+        120, 120, SET_W, 480, nullptr, nullptr, hInst, nullptr);
+    SetLayeredWindowAttributes(g_settings, 0, SETTINGS_ALPHA, LWA_ALPHA);  // полупрозрачность
+    ApplyWin11Style(g_settings);
 
     InitDefaultKeys();      // значения по умолчанию
     LoadHotkeys();          // переопределение из файла (если есть)
