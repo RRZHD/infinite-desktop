@@ -7,7 +7,7 @@ if errorlevel 1 (
     exit /b 1
 )
 cd /d "%~dp0"
-cl /nologo /utf-8 /EHsc /O2 /W3 /DUNICODE /D_UNICODE main.cpp /link /SUBSYSTEM:WINDOWS /OUT:InfiniteDesktop.exe
+cl /nologo /std:c++17 /utf-8 /EHsc /O2 /W3 /DUNICODE /D_UNICODE main.cpp src\*.cpp /Fe:InfiniteDesktop.exe /link /SUBSYSTEM:WINDOWS
 if errorlevel 1 (
     echo [!] Build failed
     exit /b 1
