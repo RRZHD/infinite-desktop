@@ -81,6 +81,7 @@ struct KeyBind { UINT mods; UINT vk; const wchar_t* name; };
 static KeyBind g_keys[HK_PIN + 1];   // индекс = HK_*
 static HWND g_settings = nullptr;    // окно настроек горячих клавиш
 static int  g_capRow = -1;           // строка в режиме перехвата клавиш (или -1)
+static std::wstring g_status;        // сообщение в окне настроек (конфликт и т.п.)
 // Геометрия окна настроек
 const int SET_W = 400, SET_HEADER = 52, SET_ROW = 30, SET_FOOTER = 46;
 const int SET_BOX_X = 210, SET_BOX_W = 170, SET_BOX_H = 24;
@@ -1069,6 +1070,13 @@ static UINT CurrentMods() {
 
 static int SetFooterY() { return SET_HEADER + (HK_PIN - HK_LEFT + 1) * SET_ROW + 10; }
 
+// Найти другое действие с тем же сочетанием (или -1).
+static int FindConflict(UINT mods, UINT vk, int exceptId) {
+    for (int id = HK_LEFT; id <= HK_PIN; ++id)
+        if (id != exceptId && g_keys[id].mods == mods && g_keys[id].vk == vk) return id;
+    return -1;
+}
+
 static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_ERASEBKGND: return 1;
@@ -1101,6 +1109,12 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
         RECT fr = { 14, SetFooterY(), rc.right - 14, SetFooterY() + 24 };
         SetTextColor(h, RGB(140, 170, 230));
         DrawTextW(h, L"Сбросить по умолчанию", -1, &fr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        if (!g_status.empty()) {
+            RECT sr = { 14, SetFooterY() + 22, rc.right - 14, SetFooterY() + 44 };
+            SetTextColor(h, RGB(255, 180, 90));
+            DrawTextW(h, g_status.c_str(), -1, &sr,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        }
         BitBlt(dc, 0, 0, rc.right, rc.bottom, h, 0, 0, SRCCOPY);
         SelectObject(h, ob); DeleteObject(bmp); DeleteDC(h);
         EndPaint(hwnd, &ps);
@@ -1112,10 +1126,10 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
         if (y >= SetFooterY() && y <= SetFooterY() + 24 && x >= 14 && x < 220) {
             InitDefaultKeys();
             UnregisterAllHotkeys(); RegisterAllHotkeys(); SaveHotkeys();
-            g_capRow = -1; InvalidateRect(hwnd, nullptr, FALSE);
+            g_capRow = -1; g_status.clear(); InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
-        g_capRow = -1;
+        g_capRow = -1; g_status.clear();
         for (int id = HK_LEFT; id <= HK_PIN; ++id) {
             int by = SET_HEADER + (id - HK_LEFT) * SET_ROW + 2;
             if (x >= SET_BOX_X && x <= SET_BOX_X + SET_BOX_W && y >= by && y <= by + SET_BOX_H) {
@@ -1129,13 +1143,19 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
     case WM_SYSKEYDOWN: {
         if (g_capRow < 0) break;
         UINT vk = (UINT)wp;
-        if (vk == VK_ESCAPE) { g_capRow = -1; InvalidateRect(hwnd, nullptr, FALSE); return 0; }
+        if (vk == VK_ESCAPE) { g_capRow = -1; g_status.clear(); InvalidateRect(hwnd, nullptr, FALSE); return 0; }
         if (IsModifierVk(vk)) return 0;
         UINT mods = CurrentMods();
         if (mods == 0) return 0;             // требуем хотя бы один модификатор
+        int conflict = FindConflict(mods, vk, g_capRow);
+        if (conflict != -1) {                // сочетание уже занято — предупреждаем, не применяем
+            g_status = L"⚠ " + KeyComboText(mods, vk) + L" уже занято: " + g_keys[conflict].name;
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;                        // остаёмся в перехвате — можно нажать другое
+        }
         g_keys[g_capRow].mods = mods;
         g_keys[g_capRow].vk   = vk;
-        g_capRow = -1;
+        g_capRow = -1; g_status.clear();
         UnregisterAllHotkeys(); RegisterAllHotkeys(); SaveHotkeys();
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
@@ -1212,10 +1232,15 @@ static LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         break;
     case WM_HOTKEY: {
         if (g_capRow >= HK_LEFT) {   // окно настроек ждёт сочетание — перехватываем
-            g_keys[g_capRow].mods = LOWORD(lp);
-            g_keys[g_capRow].vk   = HIWORD(lp);
-            g_capRow = -1;
-            UnregisterAllHotkeys(); RegisterAllHotkeys(); SaveHotkeys();
+            UINT mods = LOWORD(lp), vk = HIWORD(lp);
+            int conflict = FindConflict(mods, vk, g_capRow);
+            if (conflict != -1) {    // уже занято другим действием — предупреждаем, не применяем
+                g_status = L"⚠ " + KeyComboText(mods, vk) + L" уже занято: " + g_keys[conflict].name;
+            } else {
+                g_keys[g_capRow].mods = mods; g_keys[g_capRow].vk = vk;
+                g_capRow = -1; g_status.clear();
+                UnregisterAllHotkeys(); RegisterAllHotkeys(); SaveHotkeys();
+            }
             if (g_settings) InvalidateRect(g_settings, nullptr, FALSE);
             return 0;
         }
