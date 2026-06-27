@@ -647,6 +647,7 @@ static LRESULT CALLBACK MouseProc(int code, WPARAM wp, LPARAM lp) {
             }
             break;
         case WM_MOUSEWHEEL: {
+            if (g_dragging) return 1;   // во время панорамы СКМ колесо не зумит
             int delta = (short)HIWORD(m->mouseData);
             bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
             bool onDesk = g_overview || IsDesktopClass(WindowFromPoint(m->pt));
@@ -658,6 +659,7 @@ static LRESULT CALLBACK MouseProc(int code, WPARAM wp, LPARAM lp) {
             PanWheel(0.0, (double)delta); return 1;          // 2 пальца верт. => панорама
         }
         case WM_MOUSEHWHEEL: {
+            if (g_dragging) return 1;   // во время панорамы СКМ колесо не зумит
             bool onDesk = g_overview || IsDesktopClass(WindowFromPoint(m->pt));
             if (onDesk) { PanWheel((double)(short)HIWORD(m->mouseData), 0.0); return 1; }  // 2 пальца гориз.
             break;
