@@ -212,13 +212,19 @@ void RepositionAll() {
         }
         int x = w.world.left   - cx, y = w.world.top    - cy;
         int r = w.world.right  - cx, b = w.world.bottom - cy;
-        if (r <= vL || x >= vR || b <= vT || y >= vB) continue;   // целиком вне кадра — пропускаем
+        bool onScreen = !(r <= vL || x >= vR || b <= vT || y >= vB);
+        // Окно полностью за кадром И уже выставлено туда — двигать незачем (невидимо),
+        // это и даёт экономию synchronous SetWindowPos. Но если оно ещё НЕ припарковано
+        // (старт, либо только что ушло за край), один раз ставим его на мир-позицию,
+        // иначе оно останется в видимой зоне / застрянет, выглядывая с края.
+        if (!onScreen && w.parkedOff) continue;
         if (IsHungAppWindow(w.hwnd)) continue;   // не блокировать кадр на зависшем окне
         // Синхронно (без SWP_ASYNCWINDOWPOS): применяется сразу => окна точно следуют
         // за курсором, без «желейного» отставания от очереди асинхронных запросов.
         // SWP_NOSENDCHANGING: не дёргаем WM_WINDOWPOSCHANGING у чужого окна — быстрее.
         SetWindowPos(w.hwnd, nullptr, x, y, 0, 0,
                      SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING);
+        w.parkedOff = !onScreen;                 // выставили за кадр — пометили припаркованным
     }
 }
 

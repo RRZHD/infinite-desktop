@@ -86,6 +86,22 @@ static void FrameTick(double dt) {
             g_lastSyncTick = now;
             SyncWorldFromScreen();
             AddNewWindows();
+            // Перепроверка припаркованных за кадром окон: приложение могло само вернуть
+            // окно в видимую зону (типично сразу после открытия). Тогда снимаем парковку,
+            // и RepositionAll снова вытолкнет его на истинную мир-позицию за кадром.
+            {
+                const LONG vL = g_vsX, vT = g_vsY, vR = g_vsX + g_vsW, vB = g_vsY + g_vsH;
+                bool repark = false;
+                for (auto& w : g_wins) {
+                    if (!w.parkedOff || !IsWindow(w.hwnd)) continue;
+                    RECT r;
+                    if (GetWindowRect(w.hwnd, &r) &&
+                        r.right > vL && r.left < vR && r.bottom > vT && r.top < vB) {
+                        w.parkedOff = false; repark = true;
+                    }
+                }
+                if (repark) RepositionAll();
+            }
             if (g_hudVisible) {
                 RECT rc; GetClientRect(g_hud, &rc);
                 ComputeXform(rc); UpdateThumbs(rc);

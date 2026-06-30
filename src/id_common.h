@@ -38,6 +38,7 @@ struct TrackedWin {
     bool       pinned;           // закреплено: не двигается с панорамой
     HTHUMBNAIL thumb;            // живое DWM-превью на миникарте (или nullptr)
     HTHUMBNAIL thumbOv;          // живое DWM-превью в полноэкранном обзоре (зум)
+    bool       parkedOff = false; // окно физически выставлено за кадром (отсечка RepositionAll)
 };
 
 inline std::vector<TrackedWin> g_wins;
