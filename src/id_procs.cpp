@@ -1,7 +1,6 @@
 // Оконные процедуры HUD, подъезд к окну, Aero Snap, иконки, DPI
 // Часть InfiniteDesktop. Компилируется как единый модуль через main.cpp.
 
-#pragma once
 #include "id_common.h"
 
 // ---------- Оконная процедура HUD ----------
@@ -59,7 +58,7 @@ LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_SETTINGCHANGE:
-        if (wp == SPI_SETDESKWALLPAPER) LoadWallpaper();   // пользователь сменил обои
+        if (lp && !lstrcmpW((LPCWSTR)lp, L"Control Panel\\Desktop")) LoadWallpaper();
         break;
     case WM_HOTKEY: {
         if (g_capRow >= HK_LEFT) {   // окно настроек ждёт сочетание — перехватываем
@@ -176,15 +175,14 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd,
 
 void DisableSnap() {
     g_prevWinArranging = TRUE;
-    SystemParametersInfoW(SPI_GETWINARRANGING, 0, &g_prevWinArranging, 0);  // GET — в pvParam
+    if (!SystemParametersInfoW(SPI_GETWINARRANGING, 0, &g_prevWinArranging, 0)) return;
     if (g_prevWinArranging)
-        // SET — значение в uiParam (FALSE = выключить)
         SystemParametersInfoW(SPI_SETWINARRANGING, FALSE, nullptr, SPIF_SENDCHANGE);
 }
 
 void RestoreSnap() {
-    if (g_prevWinArranging)   // вернуть, только если изначально был включён
-        SystemParametersInfoW(SPI_SETWINARRANGING, TRUE, nullptr, SPIF_SENDCHANGE);
+    if (!g_prevWinArranging) return;
+    SystemParametersInfoW(SPI_SETWINARRANGING, TRUE, nullptr, SPIF_SENDCHANGE);
 }
 
 // Иконки рабочего стола рисует окно SHELLDLL_DefView (дочернее у Progman/WorkerW).

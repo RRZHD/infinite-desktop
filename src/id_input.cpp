@@ -1,7 +1,6 @@
 // Ввод: зум колесом, hook СКМ/колеса/тачпада
 // Часть InfiniteDesktop. Компилируется как единый модуль через main.cpp.
 
-#pragma once
 #include "id_common.h"
 
 // ---------- Зум колесом (вход в обзор) ----------
@@ -90,9 +89,8 @@ LRESULT CALLBACK MouseProc(int code, WPARAM wp, LPARAM lp) {
             bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
             bool onDesk = g_overview || IsDesktopClass(WindowFromPoint(m->pt));
             if (!onDesk) break;                              // внутри приложения — обычная прокрутка
-            // Классический клик колеса мыши кратен 120 => зум (как раньше).
-            // Мелкая дельта двухпальцевого скролла тачпада => панорама.
-            bool mouseWheel = (delta % WHEEL_DELTA) == 0;
+            // Колесо мыши отправляет >= WHEEL_DELTA на клик. Мелкая дельта тачпада — панорама.
+            bool mouseWheel = (abs(delta) >= WHEEL_DELTA);
             if (ctrl || mouseWheel) { DoZoom(delta, m->pt); return 1; }   // зум
             PanWheel(0.0, (double)delta); return 1;          // 2 пальца верт. => панорама
         }

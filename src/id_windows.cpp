@@ -1,7 +1,6 @@
 // Окна: виртуальный экран, фильтр, перечисление, превью, перемещение, камера
 // Часть InfiniteDesktop. Компилируется как единый модуль через main.cpp.
 
-#pragma once
 #include "id_common.h"
 
 // ---------- Виртуальный экран ----------
@@ -132,23 +131,32 @@ void RebuildWindowList() {
 // (учитывает ручное перетаскивание и закрытие окон).
 void SyncWorldFromScreen() {
     LONG cx = (LONG)llround(g_camX), cy = (LONG)llround(g_camY);
-    for (size_t i = 0; i < g_wins.size(); ) {
+    const LONG vL = g_vsX, vT = g_vsY, vR = g_vsX + g_vsW, vB = g_vsY + g_vsH;
+    size_t write = 0;
+    for (size_t i = 0; i < g_wins.size(); ++i) {
         HWND h = g_wins[i].hwnd;
         if (!IsWindow(h) || !IsWindowVisible(h) || IsIconic(h)) {
             UnregisterThumb(g_wins[i]);
             UnregisterOvThumb(g_wins[i]);
-            g_wins.erase(g_wins.begin() + i);
             continue;
         }
+        // Актуальную позицию ОС имеют только окна в кадре (RepositionAll двигает лишь их).
+        // У окон за пределами вьюпорта позиция устаревшая — их мир НЕ трогаем, иначе
+        // отсечка в RepositionAll испортила бы сохранённые мировые координаты.
+        int sx = g_wins[i].world.left  - cx, sy = g_wins[i].world.top    - cy;
+        int sr = g_wins[i].world.right - cx, sb = g_wins[i].world.bottom - cy;
+        bool onScreen = !(sr <= vL || sx >= vR || sb <= vT || sy >= vB);
         RECT r;
-        if (GetWindowRect(h, &r)) {
+        if (onScreen && GetWindowRect(h, &r)) {
             g_wins[i].world.left   = r.left   + cx;
             g_wins[i].world.top    = r.top    + cy;
             g_wins[i].world.right  = r.right  + cx;
             g_wins[i].world.bottom = r.bottom + cy;
         }
-        ++i;
+        if (write != i) g_wins[write] = std::move(g_wins[i]);
+        ++write;
     }
+    g_wins.erase(g_wins.begin() + write, g_wins.end());
 }
 
 bool IsTracked(HWND h) {
@@ -186,6 +194,11 @@ void AddNewWindows() { EnumWindows(AddNewProc, 0); }
 // ничего. SWP_ASYNCWINDOWPOS не блокирует нас на чужих потоках.
 void RepositionAll() {
     LONG cx = (LONG)llround(g_camX), cy = (LONG)llround(g_camY);
+    // Вьюпорт (виртуальный экран). Окна полностью вне него невидимы — двигать их
+    // каждый кадр незачем; это главный источник рывков при панораме/перелёте, т.к.
+    // синхронный SetWindowPos для чужого окна дорог. Ставим окно на место, лишь когда
+    // его новый прямоугольник попадает в кадр (координаты абсолютные — без «прыжка»).
+    const LONG vL = g_vsX, vT = g_vsY, vR = g_vsX + g_vsW, vB = g_vsY + g_vsH;
     for (auto& w : g_wins) {
         if (!IsWindow(w.hwnd)) continue;
         if (IsZoomed(w.hwnd)) continue;          // развёрнутые приклеены к монитору
@@ -197,13 +210,15 @@ void RepositionAll() {
             }
             continue;
         }
+        int x = w.world.left   - cx, y = w.world.top    - cy;
+        int r = w.world.right  - cx, b = w.world.bottom - cy;
+        if (r <= vL || x >= vR || b <= vT || y >= vB) continue;   // целиком вне кадра — пропускаем
         if (IsHungAppWindow(w.hwnd)) continue;   // не блокировать кадр на зависшем окне
-        int x = w.world.left - cx;
-        int y = w.world.top  - cy;
         // Синхронно (без SWP_ASYNCWINDOWPOS): применяется сразу => окна точно следуют
         // за курсором, без «желейного» отставания от очереди асинхронных запросов.
+        // SWP_NOSENDCHANGING: не дёргаем WM_WINDOWPOSCHANGING у чужого окна — быстрее.
         SetWindowPos(w.hwnd, nullptr, x, y, 0, 0,
-                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING);
     }
 }
 

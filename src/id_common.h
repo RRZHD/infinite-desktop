@@ -14,6 +14,7 @@
 #include <fstream>
 #include <sstream>
 #include <cmath>
+#include <algorithm>
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
@@ -149,6 +150,7 @@ void ComputeXform(const RECT& client);
 RECT WorldToClient(const RECT& w);
 void MapToWorld(int mx, int my, double& wx, double& wy);
 void UpdateThumbs(const RECT& client);
+void FreeMapGdi();
 HFONT UiFont();
 RECT GearRect(const RECT& client);
 void DrawMinimap(HDC hdc, const RECT& client);

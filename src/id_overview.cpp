@@ -1,7 +1,6 @@
 // Обзор (зум): превью, тени, обои, окно обзора
 // Часть InfiniteDesktop. Компилируется как единый модуль через main.cpp.
 
-#pragma once
 #include "id_common.h"
 
 // ---------- Полноэкранный обзор (зум через DWM-превью) ----------
@@ -147,10 +146,10 @@ void DrawShadow(HDC hdc, const RECT& r, int radius) {
         InflateRect(&s, i, i);
         OffsetRect(&s, 0, i / 2 + 1);               // лёгкое смещение вниз
         HRGN rgn = CreateRoundRectRgn(s.left, s.top, s.right, s.bottom,
-                                      radius + i, radius + i);
+                                       radius + i, radius + i);
         SelectClipRgn(hdc, rgn);
         AlphaBlend(hdc, s.left, s.top, s.right - s.left, s.bottom - s.top,
-                   g_blackDC, 0, 0, 1, 1, bf);
+                    g_blackDC, 0, 0, 1, 1, bf);
         DeleteObject(rgn);
     }
     SelectClipRgn(hdc, nullptr);
@@ -204,15 +203,19 @@ LRESULT CALLBACK OvProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_LBUTTONDOWN: {
         double cx = (short)LOWORD(lp), cy = (short)HIWORD(lp);
-        // верхнее окно под курсором: идём по z-порядку сверху вниз, берём первое
+        // верхнее окно под курсором: идём по z-порядку сверху вниз, берём первое попавшее
         g_ovDragHwnd = nullptr;
-        for (HWND h : g_ovZ) {
-            for (auto& w : g_wins) if (w.hwnd == h) {
+        for (int zi = (int)g_ovZ.size() - 1; zi >= 0; --zi) {
+            HWND h = g_ovZ[zi];
+            for (auto& w : g_wins) {
+                if (w.hwnd != h) continue;
                 RECT vw = VisWorld(w);
                 double l = OvClientX(vw.left),  t = OvClientY(vw.top);
                 double r = OvClientX(vw.right), b = OvClientY(vw.bottom);
-                if (cx >= l && cx <= r && cy >= t && cy <= b) g_ovDragHwnd = h;
-                break;
+                if (cx >= l && cx <= r && cy >= t && cy <= b) {
+                    g_ovDragHwnd = h;
+                    break;
+                }
             }
             if (g_ovDragHwnd) break;
         }

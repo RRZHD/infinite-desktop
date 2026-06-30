@@ -1,7 +1,6 @@
 // Миникарта: преобразование мир<->карта, отрисовка, шестерёнка
 // Часть InfiniteDesktop. Компилируется как единый модуль через main.cpp.
 
-#pragma once
 #include "id_common.h"
 
 // ---------- Преобразование мир <-> миникарта ----------
@@ -87,6 +86,22 @@ RECT GearRect(const RECT& client) {
 // ---------- Отрисовка миникарты (фон, бордюры, вьюпорт) ----------
 // DWM рисует превью ПОВЕРХ этого GDI-содержимого, поэтому бордюры окон
 // делаем чуть шире рамки превью, а рамку вьюпорта — поверх пустых зон.
+static HPEN g_framePen = nullptr, g_pinPen = nullptr, g_vpPen = nullptr;
+static HBRUSH g_fillBr = nullptr;
+static void EnsureMapGdi() {
+    if (!g_framePen) g_framePen = CreatePen(PS_SOLID, 1, RGB(90, 110, 140));
+    if (!g_fillBr)   g_fillBr   = CreateSolidBrush(RGB(70, 130, 200));
+    if (!g_pinPen)   g_pinPen   = CreatePen(PS_SOLID, 2, RGB(255, 170, 60));
+    if (!g_vpPen)    g_vpPen    = CreatePen(PS_SOLID, 2, RGB(255, 200, 60));
+}
+static void FreeMapGdiInternal() {
+    if (g_framePen) { DeleteObject(g_framePen); g_framePen = nullptr; }
+    if (g_fillBr)   { DeleteObject(g_fillBr);   g_fillBr   = nullptr; }
+    if (g_pinPen)   { DeleteObject(g_pinPen);   g_pinPen   = nullptr; }
+    if (g_vpPen)    { DeleteObject(g_vpPen);    g_vpPen    = nullptr; }
+}
+void FreeMapGdi() { FreeMapGdiInternal(); }
+
 void DrawMinimap(HDC hdc, const RECT& client) {
     HBRUSH bg = CreateSolidBrush(RGB(20, 22, 28));
     FillRect(hdc, &client, bg);
@@ -94,12 +109,10 @@ void DrawMinimap(HDC hdc, const RECT& client) {
 
     ComputeXform(client);
 
-    // С превью: тонкая рамка вокруг живой картинки.
-    // Без превью: закрашенные прямоугольники, чтобы окна были видны на карте.
-    HPEN framePen = CreatePen(PS_SOLID, 1, RGB(90, 110, 140));
-    HBRUSH fillBr = CreateSolidBrush(RGB(70, 130, 200));
-    HGDIOBJ oldPen = SelectObject(hdc, framePen);
-    HGDIOBJ oldBr  = SelectObject(hdc, (HGDIOBJ)fillBr);   // всегда закрашенные (полупрозрачное окно)
+    EnsureMapGdi();
+
+    HGDIOBJ oldPen = SelectObject(hdc, g_framePen);
+    HGDIOBJ oldBr  = SelectObject(hdc, g_fillBr);
     for (auto& w : g_wins) {
         RECT m = WorldToClient(w.world);
         InflateRect(&m, 1, 1);
@@ -107,8 +120,7 @@ void DrawMinimap(HDC hdc, const RECT& client) {
     }
 
     // закреплённые окна — янтарной рамкой
-    HPEN pinPen = CreatePen(PS_SOLID, 2, RGB(255, 170, 60));
-    SelectObject(hdc, pinPen);
+    SelectObject(hdc, g_pinPen);
     SelectObject(hdc, GetStockObject(NULL_BRUSH));
     for (auto& w : g_wins) if (w.pinned) {
         RECT m = WorldToClient(w.world);
@@ -121,16 +133,11 @@ void DrawMinimap(HDC hdc, const RECT& client) {
     LONG cx = (LONG)llround(g_camX), cy = (LONG)llround(g_camY);
     RECT vpWorld = { g_vsX + cx, g_vsY + cy, g_vsX + g_vsW + cx, g_vsY + g_vsH + cy };
     RECT vp = WorldToClient(vpWorld);
-    HPEN vpPen = CreatePen(PS_SOLID, 2, RGB(255, 200, 60));
-    SelectObject(hdc, vpPen);
+    SelectObject(hdc, g_vpPen);
     Rectangle(hdc, vp.left, vp.top, vp.right, vp.bottom);
 
     SelectObject(hdc, oldPen);
     SelectObject(hdc, oldBr);
-    DeleteObject(framePen);
-    DeleteObject(fillBr);
-    DeleteObject(vpPen);
-    DeleteObject(pinPen);
 
     SetBkMode(hdc, TRANSPARENT);
     HGDIOBJ oldFont = SelectObject(hdc, UiFont());

@@ -227,6 +227,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     SaveLayout();            // запомнить мировые позиции на следующий запуск
     GatherToDesktop();       // окна возвращаются на видимый стол
 
+    FreeMapGdi();
     UnregisterAllThumbs();
     UnregisterAllOvThumbs();
     if (g_ovMemDC) DeleteDC(g_ovMemDC);
