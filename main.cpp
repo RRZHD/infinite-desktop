@@ -24,6 +24,23 @@
 
 // ---------- Кадр анимации и точка входа ----------
 static void FrameTick(double dt) {
+    bool dragging = g_dragging.load(std::memory_order_acquire);
+    long dragDx = g_dragDeltaX.exchange(0, std::memory_order_acq_rel);
+    long dragDy = g_dragDeltaY.exchange(0, std::memory_order_acq_rel);
+    if (dragDx || dragDy) {
+        if (g_overview) {
+            // В обзоре СКМ двигает сам зум-вид (якорь).
+            g_axCX += dragDx;
+            g_axCY += dragDy;
+        } else {
+            // «Рука»: окна следуют за курсором, значит камера идёт в обратную сторону.
+            g_camX -= dragDx;
+            g_camY -= dragDy;
+            g_targetX = g_camX;
+            g_targetY = g_camY;
+        }
+    }
+
     double kz = 1.0 - pow(1.0 - ZOOM_EASE, dt * 60.0);   // эквивалент при 60 Гц
     if (fabs(g_zoomTarget - g_zoom) > 0.001) g_zoom += (g_zoomTarget - g_zoom) * kz;
     else g_zoom = g_zoomTarget;
@@ -59,7 +76,7 @@ static void FrameTick(double dt) {
         }
     }
 
-    if (!g_dragging) {
+    if (!dragging) {
         double k = 1.0 - pow(1.0 - EASE, dt * 60.0);
         double dx = g_targetX - g_camX, dy = g_targetY - g_camY;
         if (fabs(dx) > 0.5 || fabs(dy) > 0.5) {
@@ -80,7 +97,7 @@ static void FrameTick(double dt) {
             ComputeXform(rc); UpdateThumbs(rc);
             InvalidateRect(g_hud, nullptr, FALSE);
         }
-    } else if (!g_dragging) {
+    } else if (!dragging) {
         DWORD now = GetTickCount();
         if (now - g_lastSyncTick >= 300) {                 // периодическая синхронизация
             g_lastSyncTick = now;
@@ -118,8 +135,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     DisableSnap();          // на бесконечном столе краёв нет — выключаем Aero Snap
     HideDesktopIcons();     // убираем ярлыки рабочего стола на время работы
 
-    Gdiplus::GdiplusStartupInput gsi;
-    Gdiplus::GdiplusStartup(&g_gdiToken, &gsi, nullptr);
     LoadWallpaper();   // обои пользователя для фона обзора
 
     // Класс и окно полноэкранного обзора (зум), пока скрыто
@@ -182,7 +197,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         UpdateThumbs(rc);
     }
     // Глобальный hook СКМ/колеса — на отдельном потоке (устойчив к подвисаниям)
-    g_hookThread = CreateThread(nullptr, 0, HookThreadProc, hInst, 0, &g_hookThreadId);
+    g_hookThread.reset(CreateThread(nullptr, 0, HookThreadProc, hInst, 0, &g_hookThreadId));
 
     // Подъезд камеры к активируемому окну (Win+Tab / Alt+Tab / панель задач)
     g_winEventHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
@@ -217,7 +232,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         LARGE_INTEGER now;
         QueryPerformanceCounter(&now);
         double dt = (double)(now.QuadPart - prev.QuadPart) / (double)qf.QuadPart;
-        bool active = g_dragging || g_overview ||
+        bool active = g_dragging.load(std::memory_order_acquire) || g_overview ||
                       fabs(g_targetX - g_camX) > 0.5 || fabs(g_targetY - g_camY) > 0.5 ||
                       fabs(g_zoomTarget - g_zoom) > 0.001;
         double step = active ? TARGET : 0.030;
@@ -231,8 +246,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     if (g_winEventHook) UnhookWinEvent(g_winEventHook);
     if (g_hookThreadId) PostThreadMessageW(g_hookThreadId, WM_QUIT, 0, 0);
     if (g_hookThread) {
-        WaitForSingleObject(g_hookThread, 1000);
-        CloseHandle(g_hookThread);
+        ScopedHandle ht(g_hookThread.release());
+        WaitForSingleObject(ht, 1000);
     }
     RestoreSnap();          // вернуть прежнее состояние Aero Snap (и привязки)
     RestoreDesktopIcons();  // вернуть ярлыки рабочего стола
@@ -243,16 +258,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     SaveLayout();            // запомнить мировые позиции на следующий запуск
     GatherToDesktop();       // окна возвращаются на видимый стол
 
-    FreeMapGdi();
-    UnregisterAllThumbs();
-    UnregisterAllOvThumbs();
-    if (g_ovMemDC) DeleteDC(g_ovMemDC);
-    if (g_ovBmp)   DeleteObject(g_ovBmp);
-    if (g_wallDC)  DeleteDC(g_wallDC);
-    if (g_wallBmp) DeleteObject(g_wallBmp);
-    if (g_blackDC) DeleteDC(g_blackDC);
-    if (g_blackBmp) DeleteObject(g_blackBmp);
-    if (g_gdiToken) Gdiplus::GdiplusShutdown(g_gdiToken);
     if (g_settings) DestroyWindow(g_settings);
     if (g_ov)      DestroyWindow(g_ov);
     return 0;

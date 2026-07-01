@@ -86,26 +86,18 @@ RECT GearRect(const RECT& client) {
 // ---------- Отрисовка миникарты (фон, бордюры, вьюпорт) ----------
 // DWM рисует превью ПОВЕРХ этого GDI-содержимого, поэтому бордюры окон
 // делаем чуть шире рамки превью, а рамку вьюпорта — поверх пустых зон.
-static HPEN g_framePen = nullptr, g_pinPen = nullptr, g_vpPen = nullptr;
-static HBRUSH g_fillBr = nullptr;
+static ScopedPen  g_framePen, g_pinPen, g_vpPen;
+static ScopedBrush g_fillBr;
 static void EnsureMapGdi() {
-    if (!g_framePen) g_framePen = CreatePen(PS_SOLID, 1, RGB(90, 110, 140));
-    if (!g_fillBr)   g_fillBr   = CreateSolidBrush(RGB(70, 130, 200));
-    if (!g_pinPen)   g_pinPen   = CreatePen(PS_SOLID, 2, RGB(255, 170, 60));
-    if (!g_vpPen)    g_vpPen    = CreatePen(PS_SOLID, 2, RGB(255, 200, 60));
+    if (!g_framePen) g_framePen.reset(CreatePen(PS_SOLID, 1, RGB(90, 110, 140)));
+    if (!g_fillBr)   g_fillBr.reset(CreateSolidBrush(RGB(70, 130, 200)));
+    if (!g_pinPen)   g_pinPen.reset(CreatePen(PS_SOLID, 2, RGB(255, 170, 60)));
+    if (!g_vpPen)    g_vpPen.reset(CreatePen(PS_SOLID, 2, RGB(255, 200, 60)));
 }
-static void FreeMapGdiInternal() {
-    if (g_framePen) { DeleteObject(g_framePen); g_framePen = nullptr; }
-    if (g_fillBr)   { DeleteObject(g_fillBr);   g_fillBr   = nullptr; }
-    if (g_pinPen)   { DeleteObject(g_pinPen);   g_pinPen   = nullptr; }
-    if (g_vpPen)    { DeleteObject(g_vpPen);    g_vpPen    = nullptr; }
-}
-void FreeMapGdi() { FreeMapGdiInternal(); }
 
 void DrawMinimap(HDC hdc, const RECT& client) {
-    HBRUSH bg = CreateSolidBrush(RGB(20, 22, 28));
+    ScopedBrush bg(CreateSolidBrush(RGB(20, 22, 28)));
     FillRect(hdc, &client, bg);
-    DeleteObject(bg);
 
     ComputeXform(client);
 
@@ -147,8 +139,8 @@ void DrawMinimap(HDC hdc, const RECT& client) {
     SelectObject(hdc, oldFont);
 
     // шестерёнка (настройки горячих клавиш)
-    static HFONT gearFont = CreateFontW(20, 0, 0, 0, FW_NORMAL, 0, 0, 0,
-        DEFAULT_CHARSET, 0, 0, 0, 0, L"Segoe UI Symbol");
+    static ScopedFont gearFont(CreateFontW(20, 0, 0, 0, FW_NORMAL, 0, 0, 0,
+        DEFAULT_CHARSET, 0, 0, 0, 0, L"Segoe UI Symbol"));
     RECT gr = GearRect(client);
     HGDIOBJ of = SelectObject(hdc, gearFont);
     SetTextColor(hdc, RGB(180, 190, 205));

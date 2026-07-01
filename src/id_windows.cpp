@@ -59,28 +59,21 @@ BOOL CALLBACK EnumProc(HWND h, LPARAM) {
     LONG cx = (LONG)llround(g_camX), cy = (LONG)llround(g_camY);
     TrackedWin w;
     w.hwnd    = h;
-    w.thumb   = nullptr;
-    w.thumbOv = nullptr;
     w.vm      = ComputeVM(h, r);
     w.pinned  = false;
     w.world.left   = r.left   + cx;
     w.world.top    = r.top    + cy;
     w.world.right  = r.right  + cx;
     w.world.bottom = r.bottom + cy;
-    g_wins.push_back(w);
+    g_wins.push_back(std::move(w));
     return TRUE;
 }
 
 // ---------- DWM-превью ----------
 void RegisterThumb(TrackedWin& w) {
     if (w.thumb || !g_hud || !g_previewsOn) return;
-    DwmRegisterThumbnail(g_hud, w.hwnd, &w.thumb);
-}
-
-void UnregisterThumb(TrackedWin& w) {
-    if (w.thumb) {
-        DwmUnregisterThumbnail(w.thumb);
-        w.thumb = nullptr;
+    if (SUCCEEDED(DwmRegisterThumbnail(g_hud, w.hwnd, w.thumb.put()))) {
+        // RAII: ScopedThumbnail автоматически вызовет DwmUnregisterThumbnail при уничтожении
     }
 }
 
@@ -88,18 +81,13 @@ void RegisterAllThumbs() {
     for (auto& w : g_wins) RegisterThumb(w);
 }
 
-void UnregisterAllThumbs() {
-    for (auto& w : g_wins) UnregisterThumb(w);
-}
-
 // Превью для полноэкранного обзора (зум)
 
 void RegisterOvThumb(TrackedWin& w) {
     if (w.thumbOv || !g_ov) return;
-    DwmRegisterThumbnail(g_ov, w.hwnd, &w.thumbOv);
-}
-void UnregisterOvThumb(TrackedWin& w) {
-    if (w.thumbOv) { DwmUnregisterThumbnail(w.thumbOv); w.thumbOv = nullptr; }
+    if (SUCCEEDED(DwmRegisterThumbnail(g_ov, w.hwnd, w.thumbOv.put()))) {
+        // RAII: ScopedThumbnail автоматически вызовет DwmUnregisterThumbnail при уничтожении
+    }
 }
 
 BOOL CALLBACK OvZProc(HWND h, LPARAM) {     // собрать отслеживаемые в z-порядке
@@ -117,11 +105,10 @@ void RegisterAllOvThumbs() {
         for (auto& w : g_wins) if (w.hwnd == *it) { RegisterOvThumb(w); break; }
     for (auto& w : g_wins) RegisterOvThumb(w);      // добрать не попавшие в EnumWindows
 }
-void UnregisterAllOvThumbs() { for (auto& w : g_wins) UnregisterOvThumb(w); }
 
 void RebuildWindowList() {
-    UnregisterAllThumbs();
-    UnregisterAllOvThumbs();
+    // Очистка g_wins автоматически вызывает деструкторы ScopedThumbnail,
+    // которые unregister-ят старые превью.
     g_wins.clear();
     EnumWindows(EnumProc, 0);
     if (g_hudVisible) RegisterAllThumbs();
@@ -136,8 +123,7 @@ void SyncWorldFromScreen() {
     for (size_t i = 0; i < g_wins.size(); ++i) {
         HWND h = g_wins[i].hwnd;
         if (!IsWindow(h) || !IsWindowVisible(h) || IsIconic(h)) {
-            UnregisterThumb(g_wins[i]);
-            UnregisterOvThumb(g_wins[i]);
+            // ScopedThumbnail автоматически unregister-нет превью при уничтожении
             continue;
         }
         // Актуальную позицию ОС имеют только окна в кадре (RepositionAll двигает лишь их).
@@ -172,15 +158,13 @@ BOOL CALLBACK AddNewProc(HWND h, LPARAM) {
     LONG cx = (LONG)llround(g_camX), cy = (LONG)llround(g_camY);
     TrackedWin w;
     w.hwnd    = h;
-    w.thumb   = nullptr;
-    w.thumbOv = nullptr;
     w.vm      = ComputeVM(h, r);
     w.pinned  = false;
     w.world.left   = r.left   + cx;
     w.world.top    = r.top    + cy;
     w.world.right  = r.right  + cx;
     w.world.bottom = r.bottom + cy;
-    g_wins.push_back(w);
+    g_wins.push_back(std::move(w));
     if (g_hudVisible && g_previewsOn) RegisterThumb(g_wins.back());
     if (g_overview)                   RegisterOvThumb(g_wins.back());
     return TRUE;

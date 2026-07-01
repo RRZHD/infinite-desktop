@@ -28,7 +28,8 @@ void ShowOverview() {
 
 void HideOverview() {
     if (!g_overview) return;
-    UnregisterAllOvThumbs();
+    // Очистка превью обзора: сбрасываем в g_wins, ScopedThumbnail деструктор очистит.
+    for (auto& w : g_wins) w.thumbOv.reset();
     ShowWindow(g_ov, SW_HIDE);
     g_overview = false;
 }
@@ -65,10 +66,11 @@ void UpdateOverview() {
 
 void EnsureOvCache(HDC ref, int w, int h) {
     if (g_ovMemDC && g_ovCacheW == w && g_ovCacheH == h) return;
-    if (g_ovMemDC) { DeleteDC(g_ovMemDC);    g_ovMemDC = nullptr; }
-    if (g_ovBmp)   { DeleteObject(g_ovBmp);  g_ovBmp = nullptr; }
-    g_ovMemDC = CreateCompatibleDC(ref);
-    g_ovBmp   = CreateCompatibleBitmap(ref, w, h);
+    // RAII: старые ресурсы очистятся автоматически при назначении новых
+    g_ovMemDC.reset(CreateCompatibleDC(ref));
+    if (!g_ovMemDC) return;
+    g_ovBmp.reset(CreateCompatibleBitmap(ref, w, h));
+    if (!g_ovBmp) { g_ovMemDC.reset(); return; }
     SelectObject(g_ovMemDC, g_ovBmp);
     g_ovCacheW = w; g_ovCacheH = h;
 }
@@ -96,8 +98,9 @@ BOOL CALLBACK WallMonProc(HMONITOR hm, HDC, LPRECT, LPARAM lp) {
 }
 
 void LoadWallpaper() {
-    if (g_wallDC)  { DeleteDC(g_wallDC);   g_wallDC = nullptr; }
-    if (g_wallBmp) { DeleteObject(g_wallBmp); g_wallBmp = nullptr; }
+    // RAII: старые ресурсы очистятся автоматически
+    g_wallDC.reset();
+    g_wallBmp.reset();
     g_wallW = g_wallH = 0;
 
     wchar_t path[MAX_PATH] = {};
@@ -106,16 +109,15 @@ void LoadWallpaper() {
     if (img.GetLastStatus() != Gdiplus::Ok) { g_wallPath.clear(); return; }
 
     HDC screen = GetDC(nullptr);
-    g_wallDC  = CreateCompatibleDC(screen);
-    g_wallBmp = CreateCompatibleBitmap(screen, g_vsW, g_vsH);
+    g_wallDC.reset(CreateCompatibleDC(screen));
+    g_wallBmp.reset(CreateCompatibleBitmap(screen, g_vsW, g_vsH));
     ReleaseDC(nullptr, screen);
     if (!g_wallDC || !g_wallBmp) return;
     SelectObject(g_wallDC, g_wallBmp);
 
     RECT full = { 0, 0, g_vsW, g_vsH };
-    HBRUSH bk = CreateSolidBrush(RGB(16, 18, 23));   // на случай зазоров между мониторами
+    ScopedBrush bk(CreateSolidBrush(RGB(16, 18, 23)));   // на случай зазоров между мониторами
     FillRect(g_wallDC, &full, bk);
-    DeleteObject(bk);
     {
         Gdiplus::Graphics g(g_wallDC);
         g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
@@ -129,9 +131,10 @@ void LoadWallpaper() {
 void EnsureBlack() {
     if (g_blackDC) return;
     HDC s = GetDC(nullptr);
-    g_blackDC = CreateCompatibleDC(s);
-    g_blackBmp = CreateCompatibleBitmap(s, 1, 1);
+    g_blackDC.reset(CreateCompatibleDC(s));
+    g_blackBmp.reset(CreateCompatibleBitmap(s, 1, 1));
     ReleaseDC(nullptr, s);
+    if (!g_blackDC || !g_blackBmp) return;
     SelectObject(g_blackDC, g_blackBmp);
     SetPixelV(g_blackDC, 0, 0, RGB(0, 0, 0));
 }
@@ -144,21 +147,19 @@ void DrawShadow(HDC hdc, const RECT& r, int radius) {
     for (int i = 7; i >= 1; --i) {
         RECT s = r;
         InflateRect(&s, i, i);
-        OffsetRect(&s, 0, i / 2 + 1);               // лёгкое смещение вниз
-        HRGN rgn = CreateRoundRectRgn(s.left, s.top, s.right, s.bottom,
-                                       radius + i, radius + i);
+        OffsetRect(&s, 0, i / 2 + 1);
+        ScopedRgn rgn(CreateRoundRectRgn(s.left, s.top, s.right, s.bottom,
+                                          radius + i, radius + i));
         SelectClipRgn(hdc, rgn);
         AlphaBlend(hdc, s.left, s.top, s.right - s.left, s.bottom - s.top,
                     g_blackDC, 0, 0, 1, 1, bf);
-        DeleteObject(rgn);
     }
     SelectClipRgn(hdc, nullptr);
 }
 
 void DrawOverview(HDC hdc, const RECT& client) {
-    HBRUSH bg = CreateSolidBrush(RGB(0, 0, 0));
+    ScopedBrush bg(CreateSolidBrush(RGB(0, 0, 0)));
     FillRect(hdc, &client, bg);
-    DeleteObject(bg);
     if (g_wallBmp) {
         // Обои пользователя, затемнённые тем сильнее, чем дальше отдалили.
         double dim = (1.0 - g_zoom) / (1.0 - ZOOM_MIN);

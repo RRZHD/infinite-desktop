@@ -161,10 +161,10 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_PAINT: {
         PAINTSTRUCT ps; HDC dc = BeginPaint(hwnd, &ps);
         RECT rc; GetClientRect(hwnd, &rc);
-        HDC h = CreateCompatibleDC(dc);
-        HBITMAP bmp = CreateCompatibleBitmap(dc, rc.right, rc.bottom);
+        ScopedDC h(CreateCompatibleDC(dc));
+        ScopedBitmap bmp(CreateCompatibleBitmap(dc, rc.right, rc.bottom));
         HGDIOBJ ob = SelectObject(h, bmp);
-        HBRUSH bg = CreateSolidBrush(RGB(24, 26, 32)); FillRect(h, &rc, bg); DeleteObject(bg);
+        ScopedBrush bg(CreateSolidBrush(RGB(24, 26, 32))); FillRect(h, &rc, bg);
         SetBkMode(h, TRANSPARENT);
         HGDIOBJ oldF = SelectObject(h, UiFont());
         SetTextColor(h, RGB(210, 215, 225));
@@ -178,8 +178,8 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             DrawTextW(h, g_keys[id].name, -1, &nr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             RECT box = { SET_BOX_X, y + 2, SET_BOX_X + SET_BOX_W, y + 2 + SET_BOX_H };
             bool cap = (g_capRow == id);
-            HBRUSH bb = CreateSolidBrush(cap ? RGB(60, 80, 120) : RGB(44, 47, 56));
-            FillRect(h, &box, bb); DeleteObject(bb);
+            ScopedBrush bb(CreateSolidBrush(cap ? RGB(60, 80, 120) : RGB(44, 47, 56)));
+            FillRect(h, &box, bb);
             FrameRect(h, &box, (HBRUSH)GetStockObject(GRAY_BRUSH));
             SetTextColor(h, cap ? RGB(255, 230, 140) : RGB(220, 225, 235));
             std::wstring t = cap ? L"нажмите клавиши…" : KeyComboText(g_keys[id].mods, g_keys[id].vk);
@@ -200,7 +200,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         SelectObject(h, oldF);
         BitBlt(dc, 0, 0, rc.right, rc.bottom, h, 0, 0, SRCCOPY);
-        SelectObject(h, ob); DeleteObject(bmp); DeleteDC(h);
+        SelectObject(h, ob);
         EndPaint(hwnd, &ps);
         return 0;
     }

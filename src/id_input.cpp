@@ -36,7 +36,8 @@ void DoZoomFactor(double factor, POINT pt) {
 
 // Тик колеса: один шаг зума к/от курсора.
 void DoZoom(int delta, POINT pt) {
-    DoZoomFactor(delta > 0 ? ZOOM_STEP : 1.0 / ZOOM_STEP, pt);
+    double ticks = (double)delta / (double)WHEEL_DELTA;
+    DoZoomFactor(pow(ZOOM_STEP, ticks), pt);
 }
 
 // Панорама холста двухпальцевым скроллом (delta колеса/гориз.колеса).
@@ -61,30 +62,26 @@ LRESULT CALLBACK MouseProc(int code, WPARAM wp, LPARAM lp) {
             // Панораму берём только над пустым столом / в обзоре / по Ctrl+СКМ.
             // Над окном приложения (Blender, браузер) СКМ уходит в само приложение.
             if (g_overview || ctrl || IsDesktopClass(WindowFromPoint(m->pt))) {
-                g_dragging = true;
+                g_dragDeltaX.store(0, std::memory_order_relaxed);
+                g_dragDeltaY.store(0, std::memory_order_relaxed);
+                g_dragging.store(true, std::memory_order_release);
                 g_lastMouse = m->pt;
                 return 1;             // поглощаем только когда сами панорамим
             }
             break;                    // иначе СКМ — в приложение
         }
         case WM_MOUSEMOVE:
-            if (g_dragging) {
+            if (g_dragging.load(std::memory_order_acquire)) {
                 int dx = m->pt.x - g_lastMouse.x;
                 int dy = m->pt.y - g_lastMouse.y;
                 g_lastMouse = m->pt;
-                if (g_overview) {
-                    // в обзоре СКМ двигает сам зум-вид (якорь)
-                    g_axCX += dx; g_axCY += dy;
-                } else {
-                    // «рука»: окна следуют за курсором => камера в обратную сторону.
-                    g_camX -= dx; g_camY -= dy;
-                    g_targetX = g_camX; g_targetY = g_camY;
-                }
+                g_dragDeltaX.fetch_add(dx, std::memory_order_relaxed);
+                g_dragDeltaY.fetch_add(dy, std::memory_order_relaxed);
                 // НЕ поглощаем move — иначе системный курсор замирает на месте.
             }
             break;
         case WM_MOUSEWHEEL: {
-            if (g_dragging) return 1;   // во время панорамы СКМ колесо не зумит
+            if (g_dragging.load(std::memory_order_acquire)) return 1;   // во время панорамы СКМ колесо не зумит
             int delta = (short)HIWORD(m->mouseData);
             bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
             bool onDesk = g_overview || IsDesktopClass(WindowFromPoint(m->pt));
@@ -95,13 +92,16 @@ LRESULT CALLBACK MouseProc(int code, WPARAM wp, LPARAM lp) {
             PanWheel(0.0, (double)delta); return 1;          // 2 пальца верт. => панорама
         }
         case WM_MOUSEHWHEEL: {
-            if (g_dragging) return 1;   // во время панорамы СКМ колесо не зумит
+            if (g_dragging.load(std::memory_order_acquire)) return 1;   // во время панорамы СКМ колесо не зумит
             bool onDesk = g_overview || IsDesktopClass(WindowFromPoint(m->pt));
             if (onDesk) { PanWheel((double)(short)HIWORD(m->mouseData), 0.0); return 1; }  // 2 пальца гориз.
             break;
         }
         case WM_MBUTTONUP:
-            if (g_dragging) { g_dragging = false; return 1; }
+            if (g_dragging.load(std::memory_order_acquire)) {
+                g_dragging.store(false, std::memory_order_release);
+                return 1;
+            }
             break;
         }
     }

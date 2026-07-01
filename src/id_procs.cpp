@@ -10,14 +10,12 @@ LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
         RECT rc; GetClientRect(hwnd, &rc);
-        HDC mem = CreateCompatibleDC(hdc);
-        HBITMAP bmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
+        ScopedDC mem(CreateCompatibleDC(hdc));
+        ScopedBitmap bmp(CreateCompatibleBitmap(hdc, rc.right, rc.bottom));
         HGDIOBJ old = SelectObject(mem, bmp);
         DrawMinimap(mem, rc);
         BitBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
         SelectObject(mem, old);
-        DeleteObject(bmp);
-        DeleteDC(mem);
         EndPaint(hwnd, &ps);
         return 0;
     }
@@ -85,7 +83,8 @@ LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_hudVisible = !g_hudVisible;
             if (g_hudVisible) { RegisterAllThumbs(); ShowWindow(g_hud, SW_SHOWNA); }
             else {
-                UnregisterAllThumbs();
+                // RAII: ScopedThumbnail очистит превью при reset().
+                for (auto& w : g_wins) w.thumb.reset();
                 ShowWindow(g_hud, SW_HIDE);
                 if (g_settings) ShowWindow(g_settings, SW_HIDE);  // шестерёнка скрывается с картой
             }
@@ -93,7 +92,10 @@ LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case HK_PREVIEW:
             g_previewsOn = !g_previewsOn;
             if (g_previewsOn) { if (g_hudVisible) RegisterAllThumbs(); }
-            else                UnregisterAllThumbs();   // снять живые превью
+            else {
+                // RAII: ScopedThumbnail очистит превью при reset().
+                for (auto& w : g_wins) w.thumb.reset();
+            }
             InvalidateRect(g_hud, nullptr, FALSE);
             break;
         case HK_PIN: {
