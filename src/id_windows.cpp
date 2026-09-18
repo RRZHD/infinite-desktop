@@ -136,10 +136,17 @@ void SyncWorldFromScreen(AppState& app) {
         bool onScreen = !(sr <= vL || sx >= vR || sb <= vT || sy >= vB);
         RECT r;
         if (onScreen && GetWindowRect(h, &r)) {
-            app.wins[i].world.left   = r.left   + cx;
-            app.wins[i].world.top    = r.top    + cy;
-            app.wins[i].world.right  = r.right  + cx;
-            app.wins[i].world.bottom = r.bottom + cy;
+            RECT& wr = app.wins[i].world;
+            // Размер окна изменился (пользователь тянул край). Новую область, оказавшуюся
+            // за монитором, приложение могло не отрисовать — в DWM-превью там чёрное.
+            // Просим перерисоваться целиком. Без RDW_UPDATENOW: не блокируемся на чужом
+            // окне, оно отрисуется на своём следующем цикле сообщений.
+            if ((r.right - r.left) != (wr.right - wr.left) || (r.bottom - r.top) != (wr.bottom - wr.top))
+                RedrawWindow(h, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+            wr.left   = r.left   + cx;
+            wr.top    = r.top    + cy;
+            wr.right  = r.right  + cx;
+            wr.bottom = r.bottom + cy;
         }
         if (write != i) app.wins[write] = std::move(app.wins[i]);
         ++write;
@@ -175,6 +182,22 @@ BOOL CALLBACK AddNewProc(HWND h, LPARAM) {
 
 void AddNewWindows(AppState& app) { EnumWindows(AddNewProc, 0); }
 
+// Позиция «парковки» окна за кадром. Ставим его не на истинное (возможно далёкое)
+// место, а вплотную за ближайшим краем экрана так, чтобы прямоугольник окна перекрывал
+// монитор ровно на 1 px. Тогда MonitorFromWindow(...) по-прежнему != NULL — иначе ряд
+// приложений (Photoshop и другие Adobe) в WM_WINDOWPOSCHANGED считают окно «потерянным»
+// вне всех мониторов и сами его сворачивают. Этот 1 px приходится на невидимую DWM-рамку
+// (тень/зона изменения размера), так что визуально ничего не торчит. Физическая позиция
+// припаркованного окна не важна: при возврате в кадр RepositionAll ставит его на истинную.
+static void ParkPos(const AppState& app, const TrackedWin& w, int& x, int& y) {
+    const LONG vL = app.vsX, vT = app.vsY, vR = app.vsX + app.vsW, vB = app.vsY + app.vsH;
+    const LONG wd = w.world.right - w.world.left, ht = w.world.bottom - w.world.top;
+    if      (x >= vR)       x = vR - 1;        // справа: левый край на 1 px внутри экрана
+    else if (x + wd <= vL)  x = vL - wd + 1;   // слева:  правый край на 1 px внутри
+    if      (y >= vB)       y = vB - 1;        // снизу
+    else if (y + ht <= vT)  y = vT - ht + 1;   // сверху
+}
+
 // Расставить все окна по экрану согласно текущей камере.
 // Индивидуальные SetWindowPos (а не DeferWindowPos): батч-перемещение чужих
 // окон через HDWP ненадёжно — один сбой обнуляет весь батч, и не двигается
@@ -206,12 +229,17 @@ void RepositionAll(AppState& app) {
         // иначе оно останется в видимой зоне / застрянет, выглядывая с края.
         if (!onScreen && w.parkedOff) continue;
         if (IsHungAppWindow(w.hwnd)) continue;   // не блокировать кадр на зависшем окне
+        if (!onScreen) ParkPos(app, w, x, y);    // за кадр — к краю экрана, не на далёкую позицию
         // Синхронно (без SWP_ASYNCWINDOWPOS): применяется сразу => окна точно следуют
         // за курсором, без «желейного» отставания от очереди асинхронных запросов.
         // SWP_NOSENDCHANGING: не дёргаем WM_WINDOWPOSCHANGING у чужого окна — быстрее.
         SetWindowPos(w.hwnd, nullptr, x, y, 0, 0,
                      SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING);
         w.parkedOff = !onScreen;                 // выставили за кадр — пометили припаркованным
+        if (!onScreen) {                         // запомнили ФАКТИЧЕСКОЕ место парковки:
+            RECT rr;                             // окно может лечь не ровно в запрошенную точку,
+            w.parkedPos = GetWindowRect(w.hwnd, &rr) ? POINT{ rr.left, rr.top } : POINT{ x, y };
+        }                                        // иначе перепроверка зациклилась бы
     }
 }
 

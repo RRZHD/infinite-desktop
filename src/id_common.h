@@ -172,6 +172,7 @@ struct TrackedWin {
     ScopedThumbnail thumb;            // живое DWM-превью на миникарте
     ScopedThumbnail thumbOv;          // живое DWM-превью в полноэкранном обзоре (зум)
     bool            parkedOff = false; // окно физически выставлено за кадром (отсечка RepositionAll)
+    POINT           parkedPos = {};    // куда именно поставили при парковке (детекция чужих сдвигов)
 };
 const int   MAP_W = 420, MAP_H = 260, MAP_MARGIN = 16;
 const BYTE  HUD_ALPHA = 224, SETTINGS_ALPHA = 238;  // полупрозрачность

@@ -103,17 +103,18 @@ static void FrameTick(AppState& app, double dt) {
             app.lastSyncTick = now;
             SyncWorldFromScreen(app);
             AddNewWindows(app);
-            // Перепроверка припаркованных за кадром окон: приложение могло само вернуть
-            // окно в видимую зону (типично сразу после открытия). Тогда снимаем парковку,
-            // и RepositionAll снова вытолкнет его на истинную мир-позицию за кадром.
+            // Перепроверка припаркованных за кадром окон: приложение могло само сдвинуть
+            // окно с места парковки (типично сразу после открытия). Сравниваем с точкой,
+            // куда его поставили мы: припаркованное окно перекрывает край экрана на 1 px,
+            // поэтому критерий «пересекает вьюпорт» здесь не годится — срабатывал бы всегда.
+            // Сдвинуто — снимаем парковку, и RepositionAll вернёт его к краю.
             {
-                const LONG vL = app.vsX, vT = app.vsY, vR = app.vsX + app.vsW, vB = app.vsY + app.vsH;
                 bool repark = false;
                 for (auto& w : app.wins) {
                     if (!w.parkedOff || !IsWindow(w.hwnd)) continue;
                     RECT r;
                     if (GetWindowRect(w.hwnd, &r) &&
-                        r.right > vL && r.left < vR && r.bottom > vT && r.top < vB) {
+                        (r.left != w.parkedPos.x || r.top != w.parkedPos.y)) {
                         w.parkedOff = false; repark = true;
                     }
                 }
