@@ -11,12 +11,13 @@ LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
         RECT rc; GetClientRect(hwnd, &rc);
-        ScopedDC mem(CreateCompatibleDC(hdc));
-        ScopedBitmap bmp(CreateCompatibleBitmap(hdc, rc.right, rc.bottom));
-        HGDIOBJ old = SelectObject(mem, bmp);
-        DrawMinimap(app, mem, rc);
-        BitBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
-        SelectObject(mem, old);
+        EnsureHudCache(app, hdc, rc.right, rc.bottom);   // буфер живёт между кадрами
+        if (app.hudMemDC) {
+            DrawMinimap(app, app.hudMemDC, rc);
+            BitBlt(hdc, 0, 0, rc.right, rc.bottom, app.hudMemDC, 0, 0, SRCCOPY);
+        } else {
+            DrawMinimap(app, hdc, rc);                   // нет памяти под буфер — рисуем напрямую
+        }
         EndPaint(hwnd, &ps);
         return 0;
     }
@@ -156,7 +157,29 @@ void CenterOnCursorMonitor(AppState& app, double wx, double wy) {
 void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd,
                                   LONG idObject, LONG, DWORD, DWORD) {
     AppState& app = *g_app;
-    if (event != EVENT_SYSTEM_FOREGROUND || idObject != OBJID_WINDOW || !hwnd) return;
+    if (idObject != OBJID_WINDOW || !hwnd) return;
+
+    // Пользователь начал/закончил тащить или ресайзить окно мышью (или Win+стрелки).
+    // Пока идёт перетаскивание, FrameTick читает позицию этого окна каждый кадр —
+    // миникарта следует за ним плавно, а не рывками фоновой синхронизации раз в 300 мс.
+    if (event == EVENT_SYSTEM_MOVESIZESTART) {
+        if (IsTracked(app, hwnd)) app.moveSizeHwnd = hwnd;
+        return;
+    }
+    if (event == EVENT_SYSTEM_MOVESIZEEND) {
+        if (app.moveSizeHwnd == hwnd) {
+            app.moveSizeHwnd = nullptr;
+            SyncWorldFromScreen(app);   // финальная позиция + перерисовка при смене размера
+            if (app.hudVisible) {
+                RECT rc; GetClientRect(app.hud, &rc);
+                ComputeXform(app, rc); UpdateThumbs(app, rc);
+                InvalidateRect(app.hud, nullptr, FALSE);
+            }
+        }
+        return;
+    }
+
+    if (event != EVENT_SYSTEM_FOREGROUND) return;
     if (app.overview) return;   // в режиме обзора зум не трогаем
     for (auto& w : app.wins) {
         if (w.hwnd != hwnd) continue;

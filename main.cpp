@@ -56,12 +56,16 @@ static void FrameTick(AppState& app, double dt) {
             HideOverview(app);
             // дальше — обычная логика (окна уже расставлены)
         } else {
-            // периодически перечитываем обои (слайдшоу/смена в реальном времени),
-            // когда зум устаканился — чтобы не дёргать кадры во время анимации
+            // периодически проверяем обои (слайдшоу/смена в реальном времени), когда зум
+            // устаканился. Проверка — дешёвый stat файла; полная перекодировка (GDI+ decode
+            // + бикубический ресемплинг под все мониторы, десятки мс) — только при смене.
+            // Раньше перекодировка шла безусловно каждые 1.5 с — заметная заминка в обзоре.
             if (fabs(app.zoomTarget - app.zoom) < 0.001 && GetTickCount() - app.lastWallCap >= 1500) {
                 app.lastWallCap = GetTickCount();
-                LoadWallpaper(app);
-                InvalidateRect(app.ov, nullptr, FALSE);
+                if (WallpaperFileChanged(app)) {
+                    LoadWallpaper(app);
+                    InvalidateRect(app.ov, nullptr, FALSE);
+                }
             }
             // перерисовываем обзор только при изменениях (зум/панорама/перетаскивание)
             bool ovChanged = (app.zoom != app.ovLastZoom || app.axCX != app.ovLastAxCX ||
@@ -83,6 +87,30 @@ static void FrameTick(AppState& app, double dt) {
             app.camX += dx * k; app.camY += dy * k;
             if (fabs(app.targetX - app.camX) < 0.5) app.camX = app.targetX;
             if (fabs(app.targetY - app.camY) < 0.5) app.camY = app.targetY;
+        }
+    }
+
+    // Пользователь тащит/ресайзит окно мышью (EVENT_SYSTEM_MOVESIZESTART..END). Камера
+    // при этом не меняется, и раньше миникарта подхватывала новую позицию только фоновой
+    // синхронизацией раз в 300 мс — отсюда рывки превью. Теперь во время перетаскивания
+    // мир этого одного окна читаем каждый кадр, и карта следует за ним плавно.
+    if (app.moveSizeHwnd) {
+        if (!IsWindow(app.moveSizeHwnd)) {
+            app.moveSizeHwnd = nullptr;          // окно закрыли посреди перетаскивания — END не придёт
+        } else {
+            LONG cx = (LONG)llround(app.camX), cy = (LONG)llround(app.camY);
+            RECT r;
+            for (auto& w : app.wins) if (w.hwnd == app.moveSizeHwnd && GetWindowRect(w.hwnd, &r)) {
+                w.world = { r.left + cx, r.top + cy, r.right + cx, r.bottom + cy };
+                break;
+            }
+            DWORD now = GetTickCount();
+            if (app.hudVisible && now - app.lastHudTick >= 16) {   // миникарта ~60 Гц достаточно
+                app.lastHudTick = now;
+                RECT rc; GetClientRect(app.hud, &rc);
+                ComputeXform(app, rc); UpdateThumbs(app, rc);
+                InvalidateRect(app.hud, nullptr, FALSE);
+            }
         }
     }
 
@@ -202,16 +230,25 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     // Глобальный hook СКМ/колеса — на отдельном потоке (устойчив к подвисаниям)
     app.hookThread.reset(CreateThread(nullptr, 0, HookThreadProc, hInst, 0, &app.hookThreadId));
 
-    // Подъезд камеры к активируемому окну (Win+Tab / Alt+Tab / панель задач)
-    app.winEventHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
+    // Подъезд камеры к активируемому окну (Win+Tab / Alt+Tab / панель задач) и
+    // отслеживание перетаскивания окон мышью (MOVESIZESTART..END) для плавной миникарты.
+    // Диапазон FOREGROUND..MOVESIZEEND захватывает и события меню/захвата — их
+    // отфильтровывает WinEventProc.
+    app.winEventHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MOVESIZEEND,
                                      nullptr, WinEventProc, 0, 0,
                                      WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
 
-    // Высокочастотный цикл кадров: панорама плавная на мониторах >60 Гц.
-    // Когда есть движение — тикаем ~200 Гц; в покое спим и тикаем ~33 Гц (для синхронизации).
+    // Цикл кадров. Во время движения синхронизируемся с композитором DWM: DwmFlush
+    // блокирует до следующей композиции (= vblank монитора), так что пакет перемещений
+    // окон ложится ровно в кадр DWM, а не «когда успели». Это и убирает шлейф, и даёт
+    // честную частоту монитора: прежний sleep-цикл ждал полный период ПОСЛЕ работы кадра,
+    // поэтому реальная частота была ниже частоты монитора и плавала в зависимости от того,
+    // сколько заняли SetWindowPos. В покое DwmFlush не зовём (просыпались бы каждый
+    // vblank впустую) — спим ~30 мс и тикаем для фоновой синхронизации.
     timeBeginPeriod(1);
-    // Частота кадров = частота монитора: двигать окна чаще бессмысленно (дисплей
-    // не покажет) и при синхронном SetWindowPos лишь грузит CPU.
+    BOOL dwmOk = FALSE;
+    DwmIsCompositionEnabled(&dwmOk);             // на Win8+ всегда TRUE; fallback на всякий случай
+    // Частота монитора — только для запасного пути без DWM.
     DEVMODEW dm = {}; dm.dmSize = sizeof(dm);
     double hz = 120.0;
     if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1)
@@ -222,6 +259,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     QueryPerformanceFrequency(&qf);
     QueryPerformanceCounter(&prev);
     const double TARGET = 1.0 / hz;
+    const double IDLE   = 0.030;
     bool running = true;
     while (running) {
         MSG msg;
@@ -236,13 +274,27 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         QueryPerformanceCounter(&now);
         double dt = (double)(now.QuadPart - prev.QuadPart) / (double)qf.QuadPart;
         bool active = app.dragging.load(std::memory_order_acquire) || app.overview ||
+                      app.moveSizeHwnd != nullptr ||          // тащат окно — карта следит покадрово
                       fabs(app.targetX - app.camX) > 0.5 || fabs(app.targetY - app.camY) > 0.5 ||
                       fabs(app.zoomTarget - app.zoom) > 0.001;
-        double step = active ? TARGET : 0.030;
-        DWORD waitms;
-        if (dt >= step) { prev = now; FrameTick(app, dt); waitms = (DWORD)(step * 1000.0); }
-        else            { waitms = (DWORD)((step - dt) * 1000.0 + 0.5); }
-        MsgWaitForMultipleObjectsEx(0, nullptr, waitms, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        if (active) {
+            prev = now;
+            FrameTick(app, dt);
+            if (dwmOk) {
+                DwmFlush();                      // до следующей композиции DWM (vblank)
+            } else {
+                // Запасной путь: ждём до абсолютного дедлайна now + TARGET с учётом
+                // уже потраченного на кадр времени, а не «TARGET после кадра».
+                LARGE_INTEGER t; QueryPerformanceCounter(&t);
+                double left = TARGET - (double)(t.QuadPart - now.QuadPart) / (double)qf.QuadPart;
+                if (left > 0.0005)
+                    MsgWaitForMultipleObjectsEx(0, nullptr, (DWORD)(left * 1000.0), QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+            }
+        } else {
+            if (dt >= IDLE) { prev = now; FrameTick(app, dt); dt = 0; }
+            DWORD waitms = (DWORD)((IDLE - dt) * 1000.0 + 0.5);
+            MsgWaitForMultipleObjectsEx(0, nullptr, waitms, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        }
     }
     timeEndPeriod(1);
 

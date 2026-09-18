@@ -89,17 +89,29 @@ RECT GearRect(const RECT& client) {
 static void EnsureMapGdi(AppState& app) {
     if (!app.framePen) app.framePen.reset(CreatePen(PS_SOLID, 1, RGB(90, 110, 140)));
     if (!app.fillBr)   app.fillBr.reset(CreateSolidBrush(RGB(70, 130, 200)));
+    if (!app.mapBg)    app.mapBg.reset(CreateSolidBrush(RGB(20, 22, 28)));
     if (!app.pinPen)   app.pinPen.reset(CreatePen(PS_SOLID, 2, RGB(255, 170, 60)));
     if (!app.vpPen)    app.vpPen.reset(CreatePen(PS_SOLID, 2, RGB(255, 200, 60)));
 }
 
+// Постоянный задний буфер миникарты. Раньше на каждый WM_PAINT (до 60 раз/с при
+// панораме) создавались и уничтожались DC и битмап 420×260 — теперь только при
+// смене размера.
+void EnsureHudCache(AppState& app, HDC ref, int w, int h) {
+    if (app.hudMemDC && app.hudCacheW == w && app.hudCacheH == h) return;
+    app.hudMemDC.reset(CreateCompatibleDC(ref));
+    if (!app.hudMemDC) return;
+    app.hudBmp.reset(CreateCompatibleBitmap(ref, w, h));
+    if (!app.hudBmp) { app.hudMemDC.reset(); return; }
+    SelectObject(app.hudMemDC, app.hudBmp);
+    app.hudCacheW = w; app.hudCacheH = h;
+}
+
 void DrawMinimap(AppState& app, HDC hdc, const RECT& client) {
-    ScopedBrush bg(CreateSolidBrush(RGB(20, 22, 28)));
-    FillRect(hdc, &client, bg);
+    EnsureMapGdi(app);
+    FillRect(hdc, &client, app.mapBg);
 
     ComputeXform(app, client);
-
-    EnsureMapGdi(app);
 
     HGDIOBJ oldPen = SelectObject(hdc, app.framePen);
     HGDIOBJ oldBr  = SelectObject(hdc, app.fillBr);

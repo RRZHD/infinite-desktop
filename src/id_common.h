@@ -261,21 +261,33 @@ struct AppState {
     ScopedDC      wallDC;
     int           wallW = 0, wallH = 0;
     std::wstring  wallPath;                // путь загруженных обоев (для отслеживания смены)
-    DWORD         lastWallCap = 0;         // время последнего перечитывания обоев в обзоре
+    ULONGLONG     wallMtime = 0;           // время изменения файла обоев (перечитываем только при смене)
+    DWORD         lastWallCap = 0;         // время последней проверки обоев в обзоре
     ScopedBitmap  blackBmp;
     ScopedDC      blackDC;                // 1x1 чёрный для мягких теней (AlphaBlend)
+    // Кэш затемнённых обоев: полноэкранный AlphaBlend делаем не каждый кадр, а только
+    // при смене квантованного уровня затемнения; кадр — лишь быстрый BitBlt.
+    ScopedBitmap  dimBmp;
+    ScopedDC      dimDC;
+    int           dimLevel = -1, dimW = 0, dimH = 0;
     // Троттлинг перерисовки обзора (не каждый кадр, только при изменениях)
     double  ovLastZoom = -1, ovLastAxCX = 0, ovLastAxCY = 0, ovLastAxWX = 0, ovLastAxWY = 0;
     std::vector<HWND>     ovZ;             // z-порядок окон в обзоре
     std::vector<SavedWin> saved;           // загруженная раскладка
-    HWINEVENTHOOK winEventHook = nullptr;  // hook активации окна
+    HWINEVENTHOOK winEventHook = nullptr;  // hook активации/перетаскивания окна
+    HWND moveSizeHwnd = nullptr;           // окно, которое пользователь сейчас тащит/ресайзит мышью
+                                           // (между EVENT_SYSTEM_MOVESIZESTART и ...END); nullptr — никакое
     BOOL prevWinArranging = TRUE;          // прежнее состояние Aero Snap
     HWND iconsWin = nullptr;               // окно иконок рабочего стола
     bool iconsWereVisible = false;
 
     // Кэш GDI-объектов миникарты (перья/кисти создаются один раз)
     ScopedPen   framePen, pinPen, vpPen;
-    ScopedBrush fillBr;
+    ScopedBrush fillBr, mapBg;
+    // Задний буфер миникарты (пересоздаётся только при смене размера, а не каждый WM_PAINT)
+    ScopedDC      hudMemDC;
+    ScopedBitmap  hudBmp;
+    int           hudCacheW = 0, hudCacheH = 0;
 
     AppState() = default;
     AppState(const AppState&) = delete;
@@ -314,6 +326,8 @@ double OvClientX(AppState& app, double wx);
 double OvClientY(AppState& app, double wy);
 RECT VisWorld(const TrackedWin& w);
 void LoadWallpaper(AppState& app);
+bool WallpaperFileChanged(AppState& app);
+void EnsureHudCache(AppState& app, HDC ref, int w, int h);
 void ShowOverview(AppState& app);
 void HideOverview(AppState& app);
 void CommitZoomCam(AppState& app);

@@ -18,7 +18,11 @@ void LoadWallpaper(AppState& app);   // определена ниже
 
 void ShowOverview(AppState& app) {
     if (app.overview) return;
-    LoadWallpaper(app); app.lastWallCap = GetTickCount();  // актуальные обои на входе
+    // Актуальные обои на входе — но перекодируем файл (GDI+ decode + бикубический
+    // ресемплинг, десятки мс) только если он реально сменился, иначе вход в зум
+    // каждый раз начинался бы с заметной задержки.
+    if (WallpaperFileChanged(app)) LoadWallpaper(app);
+    app.lastWallCap = GetTickCount();
     app.ovLastZoom = -1;   // форсировать первую перерисовку
     RegisterAllOvThumbs(app);
     SetWindowPos(app.ov, HWND_TOPMOST, app.vsX, app.vsY, app.vsW, app.vsH, SWP_NOACTIVATE);
@@ -98,14 +102,34 @@ BOOL CALLBACK WallMonProc(HMONITOR hm, HDC, LPRECT, LPARAM lp) {
     return TRUE;
 }
 
+// Сменился ли файл обоев с момента последней загрузки (путь или время изменения).
+// Дёшево: один SPI-вызов и один stat файла — в отличие от полной перекодировки.
+// Слайдшоу/«обои в реальном времени» пишут новый файл, так что mtime это ловит.
+bool WallpaperFileChanged(AppState& app) {
+    wchar_t path[MAX_PATH] = {};
+    if (!SystemParametersInfoW(SPI_GETDESKWALLPAPER, MAX_PATH, path, 0) || !path[0])
+        return !app.wallPath.empty();          // обоев не стало — сбросить кэш
+    WIN32_FILE_ATTRIBUTE_DATA fa = {};
+    ULONGLONG mtime = 0;
+    if (GetFileAttributesExW(path, GetFileExInfoStandard, &fa))
+        mtime = ((ULONGLONG)fa.ftLastWriteTime.dwHighDateTime << 32) | fa.ftLastWriteTime.dwLowDateTime;
+    return app.wallPath != path || app.wallMtime != mtime || !app.wallBmp;
+}
+
 void LoadWallpaper(AppState& app) {
     // RAII: старые ресурсы очистятся автоматически
     app.wallDC.reset();
     app.wallBmp.reset();
     app.wallW = app.wallH = 0;
+    app.dimLevel = -1;                          // кэш затемнения устарел
 
     wchar_t path[MAX_PATH] = {};
     if (!SystemParametersInfoW(SPI_GETDESKWALLPAPER, MAX_PATH, path, 0) || !path[0]) { app.wallPath.clear(); return; }
+    {
+        WIN32_FILE_ATTRIBUTE_DATA fa = {};
+        app.wallMtime = GetFileAttributesExW(path, GetFileExInfoStandard, &fa)
+            ? (((ULONGLONG)fa.ftLastWriteTime.dwHighDateTime << 32) | fa.ftLastWriteTime.dwLowDateTime) : 0;
+    }
     Gdiplus::Bitmap img(path);
     if (img.GetLastStatus() != Gdiplus::Ok) { app.wallPath.clear(); return; }
 
@@ -158,18 +182,37 @@ void DrawShadow(AppState& app, HDC hdc, const RECT& r, int radius) {
     SelectClipRgn(hdc, nullptr);
 }
 
-void DrawOverview(AppState& app, HDC hdc, const RECT& client) {
-    ScopedBrush bg(CreateSolidBrush(RGB(0, 0, 0)));
-    FillRect(hdc, &client, bg);
-    if (app.wallBmp) {
-        // Обои пользователя, затемнённые тем сильнее, чем дальше отдалили.
-        double dim = (1.0 - app.zoom) / (1.0 - ZOOM_MIN);
-        if (dim < 0) dim = 0; if (dim > 1) dim = 1;
-        BYTE a = (BYTE)((1.0 - dim * 0.7) * 255.0);   // не темнее ~70%
-        BLENDFUNCTION bf = { AC_SRC_OVER, 0, a, 0 };
-        AlphaBlend(hdc, 0, 0, client.right, client.bottom,
-                   app.wallDC, 0, 0, app.wallW, app.wallH, bf);
+// Затемнённые обои для текущего уровня зума. Полноэкранный AlphaBlend (4K → ~8M
+// пикселей с чтением-записью) стоит несколько мс; во время анимации зума он шёл каждый
+// кадр. Квантуем затемнение на 64 ступени и пересчитываем только при смене ступени —
+// в остальных кадрах фон это один BitBlt. Ступень в 1/64 глазом не различима.
+static HDC DimmedWallpaper(AppState& app, HDC ref, const RECT& client) {
+    double dim = (1.0 - app.zoom) / (1.0 - ZOOM_MIN);
+    if (dim < 0) dim = 0; if (dim > 1) dim = 1;
+    int level = (int)(dim * 63.0 + 0.5);
+    int w = client.right, h = client.bottom;
+    if (!app.dimDC || app.dimW != w || app.dimH != h) {
+        app.dimDC.reset(CreateCompatibleDC(ref));
+        app.dimBmp.reset(CreateCompatibleBitmap(ref, w, h));
+        if (!app.dimDC || !app.dimBmp) { app.dimDC.reset(); return nullptr; }
+        SelectObject(app.dimDC, app.dimBmp);
+        app.dimW = w; app.dimH = h; app.dimLevel = -1;
     }
+    if (app.dimLevel != level) {
+        RECT full = { 0, 0, w, h };
+        FillRect(app.dimDC, &full, (HBRUSH)GetStockObject(BLACK_BRUSH));
+        BYTE a = (BYTE)((1.0 - (level / 63.0) * 0.7) * 255.0);   // не темнее ~70%
+        BLENDFUNCTION bf = { AC_SRC_OVER, 0, a, 0 };
+        AlphaBlend(app.dimDC, 0, 0, w, h, app.wallDC, 0, 0, app.wallW, app.wallH, bf);
+        app.dimLevel = level;
+    }
+    return app.dimDC;
+}
+
+void DrawOverview(AppState& app, HDC hdc, const RECT& client) {
+    HDC dimmed = app.wallBmp ? DimmedWallpaper(app, hdc, client) : nullptr;
+    if (dimmed) BitBlt(hdc, 0, 0, client.right, client.bottom, dimmed, 0, 0, SRCCOPY);
+    else        FillRect(hdc, &client, (HBRUSH)GetStockObject(BLACK_BRUSH));
 
     // Тени под окна (без рамок) — превью с закруглениями Win11 лягут поверх.
     int radius = (int)(8.0 * app.zoom + 0.5);
@@ -179,6 +222,9 @@ void DrawOverview(AppState& app, HDC hdc, const RECT& client) {
         RECT d = { (LONG)llround(OvClientX(app, vw.left)),  (LONG)llround(OvClientY(app, vw.top)),
                    (LONG)llround(OvClientX(app, vw.right)), (LONG)llround(OvClientY(app, vw.bottom)) };
         if (d.right <= d.left || d.bottom <= d.top) continue;
+        // Окно целиком за пределами обзора (с запасом на размах тени) — 7 регионов и
+        // AlphaBlend'ов на него тратить незачем.
+        if (d.right < -16 || d.left > client.right + 16 || d.bottom < -16 || d.top > client.bottom + 16) continue;
         DrawShadow(app, hdc, d, radius);
     }
 

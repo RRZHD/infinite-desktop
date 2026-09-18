@@ -209,6 +209,13 @@ void RepositionAll(AppState& app) {
     // синхронный SetWindowPos для чужого окна дорог. Ставим окно на место, лишь когда
     // его новый прямоугольник попадает в кадр (координаты абсолютные — без «прыжка»).
     const LONG vL = app.vsX, vT = app.vsY, vR = app.vsX + app.vsW, vB = app.vsY + app.vsH;
+    // Сначала собираем все перемещения, затем применяем их ОДНИМ пакетом
+    // (BeginDeferWindowPos/EndDeferWindowPos). При последовательных SetWindowPos композитор
+    // DWM мог снять кадр посреди цикла — часть окон уже переехала, часть ещё нет — и это
+    // давало шлейф/смаз между окнами при панораме. Пакет DWM видит в одной композиции.
+    struct Move { TrackedWin* w; int x, y; bool park; };
+    std::vector<Move> moves;
+    moves.reserve(app.wins.size());
     for (auto& w : app.wins) {
         if (!IsWindow(w.hwnd)) continue;
         if (IsZoomed(w.hwnd)) continue;          // развёрнутые приклеены к монитору
@@ -230,15 +237,32 @@ void RepositionAll(AppState& app) {
         if (!onScreen && w.parkedOff) continue;
         if (IsHungAppWindow(w.hwnd)) continue;   // не блокировать кадр на зависшем окне
         if (!onScreen) ParkPos(app, w, x, y);    // за кадр — к краю экрана, не на далёкую позицию
-        // Синхронно (без SWP_ASYNCWINDOWPOS): применяется сразу => окна точно следуют
-        // за курсором, без «желейного» отставания от очереди асинхронных запросов.
-        // SWP_NOSENDCHANGING: не дёргаем WM_WINDOWPOSCHANGING у чужого окна — быстрее.
-        SetWindowPos(w.hwnd, nullptr, x, y, 0, 0,
-                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING);
-        w.parkedOff = !onScreen;                 // выставили за кадр — пометили припаркованным
-        if (!onScreen) {                         // запомнили ФАКТИЧЕСКОЕ место парковки:
+        moves.push_back({ &w, x, y, !onScreen });
+    }
+    if (moves.empty()) return;
+
+    // Синхронно (без SWP_ASYNCWINDOWPOS): применяется сразу => окна точно следуют
+    // за курсором, без «желейного» отставания от очереди асинхронных запросов.
+    // SWP_NOSENDCHANGING: не дёргаем WM_WINDOWPOSCHANGING у чужого окна — быстрее.
+    const UINT F = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING;
+    bool batched = false;
+    if (HDWP h = BeginDeferWindowPos((int)moves.size())) {
+        for (auto& m : moves) {
+            h = DeferWindowPos(h, m.w->hwnd, nullptr, m.x, m.y, 0, 0, F);
+            if (!h) break;                       // HDWP после сбоя недействителен
+        }
+        batched = h && EndDeferWindowPos(h);
+    }
+    // Один сбой обнуляет весь пакет — тогда ничего не двигается. На этот случай
+    // применяем перемещения по одному, как раньше.
+    if (!batched)
+        for (auto& m : moves) SetWindowPos(m.w->hwnd, nullptr, m.x, m.y, 0, 0, F);
+
+    for (auto& m : moves) {
+        m.w->parkedOff = m.park;                 // выставили за кадр — пометили припаркованным
+        if (m.park) {                            // запомнили ФАКТИЧЕСКОЕ место парковки:
             RECT rr;                             // окно может лечь не ровно в запрошенную точку,
-            w.parkedPos = GetWindowRect(w.hwnd, &rr) ? POINT{ rr.left, rr.top } : POINT{ x, y };
+            m.w->parkedPos = GetWindowRect(m.w->hwnd, &rr) ? POINT{ rr.left, rr.top } : POINT{ m.x, m.y };
         }                                        // иначе перепроверка зациклилась бы
     }
 }
