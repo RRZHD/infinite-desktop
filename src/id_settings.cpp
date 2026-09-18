@@ -27,49 +27,49 @@ std::wstring UiCfgPath() {
     CreateDirectoryW(dir.c_str(), nullptr);
     return dir + L"\\ui.txt";
 }
-void SaveUiCfg() {
+void SaveUiCfg(AppState& app) {
     std::ofstream f(UiCfgPath().c_str(), std::ios::binary | std::ios::trunc);
-    if (f) { std::string s = "corner " + std::to_string(g_corner) + "\n"; f.write(s.data(), s.size()); }
+    if (f) { std::string s = "corner " + std::to_string(app.corner) + "\n"; f.write(s.data(), s.size()); }
 }
-void LoadUiCfg() {
+void LoadUiCfg(AppState& app) {
     std::ifstream f(UiCfgPath().c_str(), std::ios::binary);
     if (!f) return;
     std::string key; int v;
-    while (f >> key >> v) if (key == "corner" && v >= 0 && v <= 3) g_corner = v;
+    while (f >> key >> v) if (key == "corner" && v >= 0 && v <= 3) app.corner = v;
 }
 
 // Разместить миникарту в выбранном углу рабочей области основного монитора.
-void PlaceHud() {
-    if (!g_hud) return;
+void PlaceHud(AppState& app) {
+    if (!app.hud) return;
     RECT wa; SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
-    int x = (g_corner == 0 || g_corner == 2) ? wa.left + MAP_MARGIN : wa.right - MAP_W - MAP_MARGIN;
-    int y = (g_corner == 0 || g_corner == 1) ? wa.top + MAP_MARGIN  : wa.bottom - MAP_H - MAP_MARGIN;
-    SetWindowPos(g_hud, HWND_TOPMOST, x, y, MAP_W, MAP_H, SWP_NOACTIVATE);
+    int x = (app.corner == 0 || app.corner == 2) ? wa.left + MAP_MARGIN : wa.right - MAP_W - MAP_MARGIN;
+    int y = (app.corner == 0 || app.corner == 1) ? wa.top + MAP_MARGIN  : wa.bottom - MAP_H - MAP_MARGIN;
+    SetWindowPos(app.hud, HWND_TOPMOST, x, y, MAP_W, MAP_H, SWP_NOACTIVATE);
 }
-const wchar_t* CornerGlyph() {
-    switch (g_corner) { case 0: return L"↖"; case 1: return L"↗"; case 2: return L"↙"; default: return L"↘"; }
+const wchar_t* CornerGlyph(AppState& app) {
+    switch (app.corner) { case 0: return L"↖"; case 1: return L"↗"; case 2: return L"↙"; default: return L"↘"; }
 }
 
 // ---------- Настраиваемые горячие клавиши ----------
-void InitDefaultKeys() {
-    g_keys[HK_LEFT]    = { MOD_CONTROL | MOD_ALT, VK_LEFT,  L"Панорама влево" };
-    g_keys[HK_RIGHT]   = { MOD_CONTROL | MOD_ALT, VK_RIGHT, L"Панорама вправо" };
-    g_keys[HK_UP]      = { MOD_CONTROL | MOD_ALT, VK_UP,    L"Панорама вверх" };
-    g_keys[HK_DOWN]    = { MOD_CONTROL | MOD_ALT, VK_DOWN,  L"Панорама вниз" };
-    g_keys[HK_HOME]    = { MOD_CONTROL | MOD_ALT, 'H',      L"Домой (камера 0,0)" };
-    g_keys[HK_MAP]     = { MOD_CONTROL | MOD_ALT, 'M',      L"Миникарта вкл/выкл" };
-    g_keys[HK_REFRESH] = { MOD_CONTROL | MOD_ALT, 'R',      L"Пересобрать окна" };
-    g_keys[HK_QUIT]    = { MOD_CONTROL | MOD_ALT, 'Q',      L"Выход" };
-    g_keys[HK_PREVIEW] = { MOD_CONTROL | MOD_ALT, 'P',      L"Превью вкл/выкл" };
-    g_keys[HK_PIN]     = { MOD_CONTROL | MOD_ALT, 'F',      L"Закрепить окно" };
+void InitDefaultKeys(AppState& app) {
+    app.keys[HK_LEFT]    = { MOD_CONTROL | MOD_ALT, VK_LEFT,  L"Панорама влево" };
+    app.keys[HK_RIGHT]   = { MOD_CONTROL | MOD_ALT, VK_RIGHT, L"Панорама вправо" };
+    app.keys[HK_UP]      = { MOD_CONTROL | MOD_ALT, VK_UP,    L"Панорама вверх" };
+    app.keys[HK_DOWN]    = { MOD_CONTROL | MOD_ALT, VK_DOWN,  L"Панорама вниз" };
+    app.keys[HK_HOME]    = { MOD_CONTROL | MOD_ALT, 'H',      L"Домой (камера 0,0)" };
+    app.keys[HK_MAP]     = { MOD_CONTROL | MOD_ALT, 'M',      L"Миникарта вкл/выкл" };
+    app.keys[HK_REFRESH] = { MOD_CONTROL | MOD_ALT, 'R',      L"Пересобрать окна" };
+    app.keys[HK_QUIT]    = { MOD_CONTROL | MOD_ALT, 'Q',      L"Выход" };
+    app.keys[HK_PREVIEW] = { MOD_CONTROL | MOD_ALT, 'P',      L"Превью вкл/выкл" };
+    app.keys[HK_PIN]     = { MOD_CONTROL | MOD_ALT, 'F',      L"Закрепить окно" };
 }
 
-void RegisterAllHotkeys() {
+void RegisterAllHotkeys(AppState& app) {
     for (int id = HK_LEFT; id <= HK_PIN; ++id)
-        RegisterHotKey(g_hud, id, g_keys[id].mods, g_keys[id].vk);
+        RegisterHotKey(app.hud, id, app.keys[id].mods, app.keys[id].vk);
 }
-void UnregisterAllHotkeys() {
-    for (int id = HK_LEFT; id <= HK_PIN; ++id) UnregisterHotKey(g_hud, id);
+void UnregisterAllHotkeys(AppState& app) {
+    for (int id = HK_LEFT; id <= HK_PIN; ++id) UnregisterHotKey(app.hud, id);
 }
 
 std::wstring HotkeysPath() {
@@ -80,16 +80,16 @@ std::wstring HotkeysPath() {
     CreateDirectoryW(dir.c_str(), nullptr);
     return dir + L"\\hotkeys.txt";
 }
-void SaveHotkeys() {
+void SaveHotkeys(AppState& app) {
     std::ofstream f(HotkeysPath().c_str(), std::ios::binary | std::ios::trunc);
     if (!f) return;
     for (int id = HK_LEFT; id <= HK_PIN; ++id) {
-        std::string line = std::to_string(id) + " " + std::to_string(g_keys[id].mods)
-                         + " " + std::to_string(g_keys[id].vk) + "\n";
+        std::string line = std::to_string(id) + " " + std::to_string(app.keys[id].mods)
+                         + " " + std::to_string(app.keys[id].vk) + "\n";
         f.write(line.data(), (std::streamsize)line.size());
     }
 }
-void LoadHotkeys() {
+void LoadHotkeys(AppState& app) {
     std::ifstream f(HotkeysPath().c_str(), std::ios::binary);
     if (!f) return;
     std::string line;
@@ -97,8 +97,8 @@ void LoadHotkeys() {
         std::istringstream iss(line);
         int id, mods, vk;
         if ((iss >> id >> mods >> vk) && id >= HK_LEFT && id <= HK_PIN) {
-            g_keys[id].mods = (UINT)mods;
-            g_keys[id].vk   = (UINT)vk;
+            app.keys[id].mods = (UINT)mods;
+            app.keys[id].vk   = (UINT)vk;
         }
     }
 }
@@ -149,13 +149,14 @@ UINT CurrentMods() {
 int SetFooterY() { return SET_HEADER + (HK_PIN - HK_LEFT + 1) * SET_ROW + 10; }
 
 // Найти другое действие с тем же сочетанием (или -1).
-int FindConflict(UINT mods, UINT vk, int exceptId) {
+int FindConflict(AppState& app, UINT mods, UINT vk, int exceptId) {
     for (int id = HK_LEFT; id <= HK_PIN; ++id)
-        if (id != exceptId && g_keys[id].mods == mods && g_keys[id].vk == vk) return id;
+        if (id != exceptId && app.keys[id].mods == mods && app.keys[id].vk == vk) return id;
     return -1;
 }
 
 LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    AppState& app = *g_app;
     switch (msg) {
     case WM_ERASEBKGND: return 1;
     case WM_PAINT: {
@@ -175,14 +176,14 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             int y = SET_HEADER + (id - HK_LEFT) * SET_ROW;
             SetTextColor(h, RGB(190, 196, 208));
             RECT nr = { 14, y, SET_BOX_X - 6, y + SET_ROW };
-            DrawTextW(h, g_keys[id].name, -1, &nr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            DrawTextW(h, app.keys[id].name, -1, &nr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             RECT box = { SET_BOX_X, y + 2, SET_BOX_X + SET_BOX_W, y + 2 + SET_BOX_H };
-            bool cap = (g_capRow == id);
+            bool cap = (app.capRow == id);
             ScopedBrush bb(CreateSolidBrush(cap ? RGB(60, 80, 120) : RGB(44, 47, 56)));
             FillRect(h, &box, bb);
             FrameRect(h, &box, (HBRUSH)GetStockObject(GRAY_BRUSH));
             SetTextColor(h, cap ? RGB(255, 230, 140) : RGB(220, 225, 235));
-            std::wstring t = cap ? L"нажмите клавиши…" : KeyComboText(g_keys[id].mods, g_keys[id].vk);
+            std::wstring t = cap ? L"нажмите клавиши…" : KeyComboText(app.keys[id].mods, app.keys[id].vk);
             DrawTextW(h, t.c_str(), -1, &box, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         }
         RECT fr = { 14, SetFooterY(), rc.right - 14, SetFooterY() + 24 };
@@ -190,12 +191,12 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         DrawTextW(h, L"Сбросить по умолчанию", -1, &fr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         RECT crn = { 14, SetFooterY() + 28, rc.right - 14, SetFooterY() + 52 };
         SetTextColor(h, RGB(190, 196, 208));
-        std::wstring ct = std::wstring(L"Угол миникарты: ") + CornerGlyph() + L"   (клик — сменить)";
+        std::wstring ct = std::wstring(L"Угол миникарты: ") + CornerGlyph(app) + L"   (клик — сменить)";
         DrawTextW(h, ct.c_str(), -1, &crn, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-        if (!g_status.empty()) {
+        if (!app.status.empty()) {
             RECT sr = { 14, SetFooterY() + 56, rc.right - 14, SetFooterY() + 78 };
             SetTextColor(h, RGB(255, 180, 90));
-            DrawTextW(h, g_status.c_str(), -1, &sr,
+            DrawTextW(h, app.status.c_str(), -1, &sr,
                       DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
         }
         SelectObject(h, oldF);
@@ -208,23 +209,23 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int x = (short)LOWORD(lp), y = (short)HIWORD(lp);
         // сброс по умолчанию
         if (y >= SetFooterY() && y <= SetFooterY() + 24 && x >= 14 && x < 220) {
-            InitDefaultKeys();
-            UnregisterAllHotkeys(); RegisterAllHotkeys(); SaveHotkeys();
-            g_capRow = -1; g_status.clear(); InvalidateRect(hwnd, nullptr, FALSE);
+            InitDefaultKeys(app);
+            UnregisterAllHotkeys(app); RegisterAllHotkeys(app); SaveHotkeys(app);
+            app.capRow = -1; app.status.clear(); InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
         // смена угла миникарты
         if (y >= SetFooterY() + 28 && y <= SetFooterY() + 52 && x >= 14) {
-            g_corner = (g_corner + 1) % 4;
-            PlaceHud(); SaveUiCfg();
-            g_capRow = -1; g_status.clear(); InvalidateRect(hwnd, nullptr, FALSE);
+            app.corner = (app.corner + 1) % 4;
+            PlaceHud(app); SaveUiCfg(app);
+            app.capRow = -1; app.status.clear(); InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
-        g_capRow = -1; g_status.clear();
+        app.capRow = -1; app.status.clear();
         for (int id = HK_LEFT; id <= HK_PIN; ++id) {
             int by = SET_HEADER + (id - HK_LEFT) * SET_ROW + 2;
             if (x >= SET_BOX_X && x <= SET_BOX_X + SET_BOX_W && y >= by && y <= by + SET_BOX_H) {
-                g_capRow = id; break;
+                app.capRow = id; break;
             }
         }
         InvalidateRect(hwnd, nullptr, FALSE);
@@ -232,27 +233,27 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN: {
-        if (g_capRow < 0) break;
+        if (app.capRow < 0) break;
         UINT vk = (UINT)wp;
-        if (vk == VK_ESCAPE) { g_capRow = -1; g_status.clear(); InvalidateRect(hwnd, nullptr, FALSE); return 0; }
+        if (vk == VK_ESCAPE) { app.capRow = -1; app.status.clear(); InvalidateRect(hwnd, nullptr, FALSE); return 0; }
         if (IsModifierVk(vk)) return 0;
         UINT mods = CurrentMods();
         if (mods == 0) return 0;             // требуем хотя бы один модификатор
-        int conflict = FindConflict(mods, vk, g_capRow);
+        int conflict = FindConflict(app, mods, vk, app.capRow);
         if (conflict != -1) {                // сочетание уже занято — предупреждаем, не применяем
-            g_status = L"⚠ " + KeyComboText(mods, vk) + L" уже занято: " + g_keys[conflict].name;
+            app.status = L"⚠ " + KeyComboText(mods, vk) + L" уже занято: " + app.keys[conflict].name;
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;                        // остаёмся в перехвате — можно нажать другое
         }
-        g_keys[g_capRow].mods = mods;
-        g_keys[g_capRow].vk   = vk;
-        g_capRow = -1; g_status.clear();
-        UnregisterAllHotkeys(); RegisterAllHotkeys(); SaveHotkeys();
+        app.keys[app.capRow].mods = mods;
+        app.keys[app.capRow].vk   = vk;
+        app.capRow = -1; app.status.clear();
+        UnregisterAllHotkeys(app); RegisterAllHotkeys(app); SaveHotkeys(app);
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     }
     case WM_CLOSE:
-        g_capRow = -1;
+        app.capRow = -1;
         ShowWindow(hwnd, SW_HIDE);
         return 0;
     }
@@ -260,19 +261,20 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 // Открыть/закрыть окно настроек (по клику на шестерёнке).
-void OpenSettings() {
-    if (!g_settings) return;
-    if (IsWindowVisible(g_settings)) { ShowWindow(g_settings, SW_HIDE); return; }
+void OpenSettings(AppState& app) {
+    if (!app.settings) return;
+    if (IsWindowVisible(app.settings)) { ShowWindow(app.settings, SW_HIDE); return; }
     RECT cr = { 0, 0, SET_W, SetFooterY() + SET_FOOTER };
-    DWORD style = (DWORD)GetWindowLongW(g_settings, GWL_STYLE);
+    DWORD style = (DWORD)GetWindowLongW(app.settings, GWL_STYLE);
     AdjustWindowRect(&cr, style, FALSE);
-    RECT hr; GetWindowRect(g_hud, &hr);
+    RECT hr; GetWindowRect(app.hud, &hr);
     int w = cr.right - cr.left, hgt = cr.bottom - cr.top;
     int x = hr.right - w, yy = hr.bottom + 6;
-    SetWindowPos(g_settings, HWND_TOPMOST, x, yy, w, hgt, SWP_SHOWWINDOW);
-    SetForegroundWindow(g_settings);
-    g_capRow = -1;
-    InvalidateRect(g_settings, nullptr, TRUE);
+    SetWindowPos(app.settings, HWND_TOPMOST, x, yy, w, hgt, SWP_SHOWWINDOW);
+    SetForegroundWindow(app.settings);
+    app.capRow = -1;
+    InvalidateRect(app.settings, nullptr, TRUE);
 }
+
 
 

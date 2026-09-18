@@ -5,14 +5,14 @@
 
 // ---------- Преобразование мир <-> миникарта ----------
 // Границы мира берём по окнам (стабильны при панораме) + поле.
-void ComputeWorldBounds(RECT& out) {
-    if (g_wins.empty()) {
-        LONG cx = (LONG)llround(g_camX), cy = (LONG)llround(g_camY);
-        out.left = g_vsX + cx; out.top = g_vsY + cy;
-        out.right = out.left + g_vsW; out.bottom = out.top + g_vsH;
+void ComputeWorldBounds(AppState& app, RECT& out) {
+    if (app.wins.empty()) {
+        LONG cx = (LONG)llround(app.camX), cy = (LONG)llround(app.camY);
+        out.left = app.vsX + cx; out.top = app.vsY + cy;
+        out.right = out.left + app.vsW; out.bottom = out.top + app.vsH;
     } else {
-        out = g_wins[0].world;
-        for (auto& w : g_wins) {
+        out = app.wins[0].world;
+        for (auto& w : app.wins) {
             out.left   = min(out.left,   w.world.left);
             out.top    = min(out.top,    w.world.top);
             out.right  = max(out.right,  w.world.right);
@@ -24,8 +24,8 @@ void ComputeWorldBounds(RECT& out) {
     out.left -= mx; out.top -= my; out.right += mx; out.bottom += my;
 }
 
-void ComputeXform(const RECT& client) {
-    RECT b; ComputeWorldBounds(b);
+void ComputeXform(AppState& app, const RECT& client) {
+    RECT b; ComputeWorldBounds(app, b);
     double wW = (double)(b.right - b.left);
     double wH = (double)(b.bottom - b.top);
     if (wW < 1) wW = 1; if (wH < 1) wH = 1;
@@ -36,32 +36,32 @@ void ComputeXform(const RECT& client) {
     if (cw < 1) cw = 1; if (ch < 1) ch = 1;
     double s = min(cw / wW, ch / wH);
 
-    g_xform.s  = s;
-    g_xform.ox = pad + (LONG)((cw - wW * s) / 2);
-    g_xform.oy = pad + (LONG)((ch - wH * s) / 2);
-    g_xform.bounds = b;
+    app.xform.s  = s;
+    app.xform.ox = pad + (LONG)((cw - wW * s) / 2);
+    app.xform.oy = pad + (LONG)((ch - wH * s) / 2);
+    app.xform.bounds = b;
 }
 
-RECT WorldToClient(const RECT& w) {
+RECT WorldToClient(AppState& app, const RECT& w) {
     RECT r;
-    r.left   = g_xform.ox + (LONG)((w.left   - g_xform.bounds.left) * g_xform.s);
-    r.top    = g_xform.oy + (LONG)((w.top    - g_xform.bounds.top)  * g_xform.s);
-    r.right  = g_xform.ox + (LONG)((w.right  - g_xform.bounds.left) * g_xform.s);
-    r.bottom = g_xform.oy + (LONG)((w.bottom - g_xform.bounds.top)  * g_xform.s);
+    r.left   = app.xform.ox + (LONG)((w.left   - app.xform.bounds.left) * app.xform.s);
+    r.top    = app.xform.oy + (LONG)((w.top    - app.xform.bounds.top)  * app.xform.s);
+    r.right  = app.xform.ox + (LONG)((w.right  - app.xform.bounds.left) * app.xform.s);
+    r.bottom = app.xform.oy + (LONG)((w.bottom - app.xform.bounds.top)  * app.xform.s);
     return r;
 }
 
-void MapToWorld(int mx, int my, double& wx, double& wy) {
-    wx = g_xform.bounds.left + (mx - g_xform.ox) / g_xform.s;
-    wy = g_xform.bounds.top  + (my - g_xform.oy) / g_xform.s;
+void MapToWorld(AppState& app, int mx, int my, double& wx, double& wy) {
+    wx = app.xform.bounds.left + (mx - app.xform.ox) / app.xform.s;
+    wy = app.xform.bounds.top  + (my - app.xform.oy) / app.xform.s;
 }
 
 // Обновить позиции живых превью под текущую раскладку/камеру.
-void UpdateThumbs(const RECT& client) {
-    if (!g_hudVisible || !g_previewsOn) return;
-    for (auto& w : g_wins) {
+void UpdateThumbs(AppState& app, const RECT& client) {
+    if (!app.hudVisible || !app.previewsOn) return;
+    for (auto& w : app.wins) {
         if (!w.thumb) continue;
-        RECT d = WorldToClient(w.world);
+        RECT d = WorldToClient(app, w.world);
         DWM_THUMBNAIL_PROPERTIES p = {};
         p.dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE |
                     DWM_TNP_OPACITY | DWM_TNP_SOURCECLIENTAREAONLY;
@@ -86,46 +86,44 @@ RECT GearRect(const RECT& client) {
 // ---------- Отрисовка миникарты (фон, бордюры, вьюпорт) ----------
 // DWM рисует превью ПОВЕРХ этого GDI-содержимого, поэтому бордюры окон
 // делаем чуть шире рамки превью, а рамку вьюпорта — поверх пустых зон.
-static ScopedPen  g_framePen, g_pinPen, g_vpPen;
-static ScopedBrush g_fillBr;
-static void EnsureMapGdi() {
-    if (!g_framePen) g_framePen.reset(CreatePen(PS_SOLID, 1, RGB(90, 110, 140)));
-    if (!g_fillBr)   g_fillBr.reset(CreateSolidBrush(RGB(70, 130, 200)));
-    if (!g_pinPen)   g_pinPen.reset(CreatePen(PS_SOLID, 2, RGB(255, 170, 60)));
-    if (!g_vpPen)    g_vpPen.reset(CreatePen(PS_SOLID, 2, RGB(255, 200, 60)));
+static void EnsureMapGdi(AppState& app) {
+    if (!app.framePen) app.framePen.reset(CreatePen(PS_SOLID, 1, RGB(90, 110, 140)));
+    if (!app.fillBr)   app.fillBr.reset(CreateSolidBrush(RGB(70, 130, 200)));
+    if (!app.pinPen)   app.pinPen.reset(CreatePen(PS_SOLID, 2, RGB(255, 170, 60)));
+    if (!app.vpPen)    app.vpPen.reset(CreatePen(PS_SOLID, 2, RGB(255, 200, 60)));
 }
 
-void DrawMinimap(HDC hdc, const RECT& client) {
+void DrawMinimap(AppState& app, HDC hdc, const RECT& client) {
     ScopedBrush bg(CreateSolidBrush(RGB(20, 22, 28)));
     FillRect(hdc, &client, bg);
 
-    ComputeXform(client);
+    ComputeXform(app, client);
 
-    EnsureMapGdi();
+    EnsureMapGdi(app);
 
-    HGDIOBJ oldPen = SelectObject(hdc, g_framePen);
-    HGDIOBJ oldBr  = SelectObject(hdc, g_fillBr);
-    for (auto& w : g_wins) {
-        RECT m = WorldToClient(w.world);
+    HGDIOBJ oldPen = SelectObject(hdc, app.framePen);
+    HGDIOBJ oldBr  = SelectObject(hdc, app.fillBr);
+    for (auto& w : app.wins) {
+        RECT m = WorldToClient(app, w.world);
         InflateRect(&m, 1, 1);
         Rectangle(hdc, m.left, m.top, m.right, m.bottom);
     }
 
     // закреплённые окна — янтарной рамкой
-    SelectObject(hdc, g_pinPen);
+    SelectObject(hdc, app.pinPen);
     SelectObject(hdc, GetStockObject(NULL_BRUSH));
-    for (auto& w : g_wins) if (w.pinned) {
-        RECT m = WorldToClient(w.world);
+    for (auto& w : app.wins) if (w.pinned) {
+        RECT m = WorldToClient(app, w.world);
         InflateRect(&m, 1, 1);
         Rectangle(hdc, m.left, m.top, m.right, m.bottom);
     }
 
     // рамка вьюпорта (видимая область всех мониторов) — пустой кистью
     SelectObject(hdc, GetStockObject(NULL_BRUSH));
-    LONG cx = (LONG)llround(g_camX), cy = (LONG)llround(g_camY);
-    RECT vpWorld = { g_vsX + cx, g_vsY + cy, g_vsX + g_vsW + cx, g_vsY + g_vsH + cy };
-    RECT vp = WorldToClient(vpWorld);
-    SelectObject(hdc, g_vpPen);
+    LONG cx = (LONG)llround(app.camX), cy = (LONG)llround(app.camY);
+    RECT vpWorld = { app.vsX + cx, app.vsY + cy, app.vsX + app.vsW + cx, app.vsY + app.vsH + cy };
+    RECT vp = WorldToClient(app, vpWorld);
+    SelectObject(hdc, app.vpPen);
     Rectangle(hdc, vp.left, vp.top, vp.right, vp.bottom);
 
     SelectObject(hdc, oldPen);
@@ -147,5 +145,6 @@ void DrawMinimap(HDC hdc, const RECT& client) {
     DrawTextW(hdc, L"⚙", -1, &gr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     SelectObject(hdc, of);
 }
+
 
 

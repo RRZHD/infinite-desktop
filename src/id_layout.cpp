@@ -41,10 +41,10 @@ std::wstring LayoutPath() {
 }
 
 // Сохранить мировые позиции всех окон (формат: L<TAB>T<TAB>R<TAB>B<TAB>class<TAB>title).
-void SaveLayout() {
+void SaveLayout(AppState& app) {
     std::ofstream f(LayoutPath().c_str(), std::ios::binary | std::ios::trunc);
     if (!f) return;
-    for (auto& w : g_wins) {
+    for (auto& w : app.wins) {
         if (!IsWindow(w.hwnd)) continue;
         std::wstring cls, title;
         WinKey(w.hwnd, cls, title);
@@ -55,8 +55,8 @@ void SaveLayout() {
     }
 }
 
-void LoadLayout() {
-    g_saved.clear();
+void LoadLayout(AppState& app) {
+    app.saved.clear();
     std::ifstream f(LayoutPath().c_str(), std::ios::binary);
     if (!f) return;
     std::string line;
@@ -78,57 +78,57 @@ void LoadLayout() {
         sw.title = Utf8ToW(line.substr(t + 1));
         sw.world.left = v[0]; sw.world.top = v[1]; sw.world.right = v[2]; sw.world.bottom = v[3];
         sw.used = false;
-        g_saved.push_back(sw);
+        app.saved.push_back(sw);
     }
 }
 
 // Разложить окна «полками» без наложения. Старт — ниже уже размещённых окон.
-void SpreadWindows(const std::vector<int>& idx) {
+void SpreadWindows(AppState& app, const std::vector<int>& idx) {
     if (idx.empty()) return;
-    std::vector<bool> spread(g_wins.size(), false);
+    std::vector<bool> spread(app.wins.size(), false);
     for (int i : idx) spread[i] = true;
 
     bool any = false; RECT bb = {};
-    for (size_t i = 0; i < g_wins.size(); ++i) {
+    for (size_t i = 0; i < app.wins.size(); ++i) {
         if (spread[i]) continue;
-        RECT& r = g_wins[i].world;
+        RECT& r = app.wins[i].world;
         if (!any) { bb = r; any = true; }
         else { bb.left = min(bb.left, r.left); bb.top = min(bb.top, r.top);
                bb.right = max(bb.right, r.right); bb.bottom = max(bb.bottom, r.bottom); }
     }
     const LONG gap = 40;
-    LONG rowStartX = any ? bb.left : (LONG)g_vsX + gap;
+    LONG rowStartX = any ? bb.left : (LONG)app.vsX + gap;
     LONG x = rowStartX;
-    LONG y = any ? bb.bottom + gap : (LONG)g_vsY + gap;
+    LONG y = any ? bb.bottom + gap : (LONG)app.vsY + gap;
     LONG rowH = 0;
-    LONG maxRowW = g_vsW > 0 ? (LONG)g_vsW : 3000;   // ширина полки ~ весь виртуальный экран
+    LONG maxRowW = app.vsW > 0 ? (LONG)app.vsW : 3000;   // ширина полки ~ весь виртуальный экран
     for (int i : idx) {
-        LONG w = g_wins[i].world.right - g_wins[i].world.left;
-        LONG h = g_wins[i].world.bottom - g_wins[i].world.top;
+        LONG w = app.wins[i].world.right - app.wins[i].world.left;
+        LONG h = app.wins[i].world.bottom - app.wins[i].world.top;
         if (x - rowStartX + w > maxRowW && x > rowStartX) { x = rowStartX; y += rowH + gap; rowH = 0; }
-        g_wins[i].world.left = x;       g_wins[i].world.top = y;
-        g_wins[i].world.right = x + w;  g_wins[i].world.bottom = y + h;
+        app.wins[i].world.left = x;       app.wins[i].world.top = y;
+        app.wins[i].world.right = x + w;  app.wins[i].world.bottom = y + h;
         x += w + gap; rowH = max(rowH, h);
     }
 }
 
 // При запуске: вернуть окна на сохранённые места; новые/несопоставленные — разложить.
-void ArrangeOnStartup() {
-    std::vector<bool> assigned(g_wins.size(), false);
+void ArrangeOnStartup(AppState& app) {
+    std::vector<bool> assigned(app.wins.size(), false);
     auto tryAssign = [&](bool exact) {
-        for (size_t i = 0; i < g_wins.size(); ++i) {
+        for (size_t i = 0; i < app.wins.size(); ++i) {
             if (assigned[i]) continue;
             std::wstring cls, title;
-            WinKey(g_wins[i].hwnd, cls, title);
-            for (auto& s : g_saved) {
+            WinKey(app.wins[i].hwnd, cls, title);
+            for (auto& s : app.saved) {
                 if (s.used) continue;
                 if (s.cls != cls) continue;
                 if (exact && s.title != title) continue;
-                LONG w = g_wins[i].world.right - g_wins[i].world.left;
-                LONG h = g_wins[i].world.bottom - g_wins[i].world.top;
-                g_wins[i].world.left = s.world.left;  g_wins[i].world.top = s.world.top;
-                g_wins[i].world.right = s.world.left + w;
-                g_wins[i].world.bottom = s.world.top + h;   // позиция из файла, размер текущий
+                LONG w = app.wins[i].world.right - app.wins[i].world.left;
+                LONG h = app.wins[i].world.bottom - app.wins[i].world.top;
+                app.wins[i].world.left = s.world.left;  app.wins[i].world.top = s.world.top;
+                app.wins[i].world.right = s.world.left + w;
+                app.wins[i].world.bottom = s.world.top + h;   // позиция из файла, размер текущий
                 s.used = true; assigned[i] = true;
                 break;
             }
@@ -138,14 +138,14 @@ void ArrangeOnStartup() {
     tryAssign(false);   // запасное — по одному классу (заголовок мог измениться)
 
     std::vector<int> toSpread;
-    for (size_t i = 0; i < g_wins.size(); ++i)
+    for (size_t i = 0; i < app.wins.size(); ++i)
         if (!assigned[i]) toSpread.push_back((int)i);
-    SpreadWindows(toSpread);
+    SpreadWindows(app, toSpread);
 }
 
 // При выходе: собрать окна на видимый рабочий стол (в рабочую область монитора).
-void GatherToDesktop() {
-    for (auto& w : g_wins) {
+void GatherToDesktop(AppState& app) {
+    for (auto& w : app.wins) {
         if (!IsWindow(w.hwnd) || IsZoomed(w.hwnd)) continue;
         RECT r;
         if (!GetWindowRect(w.hwnd, &r)) continue;
@@ -164,4 +164,5 @@ void GatherToDesktop() {
 
 // Один кадр анимации/панорамы. dt — реальное время кадра (сглаживание не зависит
 // от частоты кадров). Вызывается из высокочастотного цикла, а не по WM_TIMER.
+
 

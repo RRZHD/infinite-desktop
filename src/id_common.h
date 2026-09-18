@@ -163,7 +163,7 @@ struct ScopedGdiplus {
     operator ULONG_PTR() const { return token; }
 };
 
-// ---------- Состояние ----------
+// ---------- Типы и константы ----------
 struct TrackedWin {
     HWND            hwnd;
     RECT            world;            // позиция/размер в координатах мира (по GetWindowRect)
@@ -173,23 +173,8 @@ struct TrackedWin {
     ScopedThumbnail thumbOv;          // живое DWM-превью в полноэкранном обзоре (зум)
     bool            parkedOff = false; // окно физически выставлено за кадром (отсечка RepositionAll)
 };
-
-inline std::vector<TrackedWin> g_wins;
-inline double g_camX = 0, g_camY = 0;          // текущая камера (мировая точка в левом-верхнем углу виртуального экрана)
-inline double g_targetX = 0, g_targetY = 0;    // целевая камера (для плавной анимации)
-
-// Виртуальный экран (объединение всех мониторов)
-inline int  g_vsX = 0, g_vsY = 0, g_vsW = 0, g_vsH = 0;
-
-inline HWND g_hud = nullptr;                    // окно миникарты
-inline bool g_hudVisible = true;
-inline bool g_previewsOn = true;                // живые DWM-превью на миникарте
-inline int  g_corner = 1;                       // угол миникарты: 0=ЛВ,1=ПВ,2=ЛН,3=ПН
-inline bool g_hudDrag = false;                  // зажата ЛКМ на миникарте (перетаскивание)
 const int   MAP_W = 420, MAP_H = 260, MAP_MARGIN = 16;
 const BYTE  HUD_ALPHA = 224, SETTINGS_ALPHA = 238;  // полупрозрачность
-inline int  g_syncCounter = 0;
-inline DWORD g_lastHudTick = 0, g_lastSyncTick = 0;  // троттлинг миникарты/синхронизации по времени
 
 // Хоткеи
 enum {
@@ -201,155 +186,192 @@ const double EASE     = 0.22;    // коэффициент сглаживани�
 
 // Настраиваемые горячие клавиши (сохраняются между сеансами)
 struct KeyBind { UINT mods; UINT vk; const wchar_t* name; };
-inline KeyBind g_keys[HK_PIN + 1];   // индекс = HK_*
-inline HWND g_settings = nullptr;    // окно настроек горячих клавиш
-inline int  g_capRow = -1;           // строка в режиме перехвата клавиш (или -1)
-inline std::wstring g_status;        // сообщение в окне настроек (конфликт и т.п.)
 // Геометрия окна настроек
 const int SET_W = 400, SET_HEADER = 52, SET_ROW = 30, SET_FOOTER = 90;
 const int SET_BOX_X = 210, SET_BOX_W = 170, SET_BOX_H = 24;
 
 // Текущее преобразование мир -> клиент миникарты
 struct MapXform { double s; LONG ox, oy; RECT bounds; };
-inline MapXform g_xform;
-
-// Панорама средней кнопкой мыши (глобальный hook на отдельном потоке)
-inline HHOOK      g_mouseHook = nullptr;
-inline ScopedHandle g_hookThread;
-inline DWORD      g_hookThreadId = 0;
-inline std::atomic_bool g_dragging = false;
-inline POINT      g_lastMouse = {};
-inline std::atomic<long> g_dragDeltaX = 0;
-inline std::atomic<long> g_dragDeltaY = 0;
 
 // Панорама/зум жестами тачпада (двухпальцевый свайп = колесо/гориз.колесо, пинч = Ctrl+колесо)
 const double  TP_WHEEL = 0.8;            // px панорамы на единицу delta колеса
-
-// Отслеживание изменения камеры для троттлинга перерисовки
-inline double g_lastCamX = 1e18, g_lastCamY = 1e18;
-
-// Зум-обзор через DWM-превью (зум-аут всего рабочего стола колесом)
-inline HWND          g_ov = nullptr;            // полноэкранное окно обзора
-inline bool          g_overview = false;        // активен ли обзор
-inline double        g_zoom = 1.0;              // текущий масштаб обзора (<=1)
-inline double        g_zoomTarget = 1.0;        // целевой масштаб
-// Якорь зума: мировая точка g_axW удерживается в клиентской точке g_axC
-inline double        g_axWX = 0, g_axWY = 0, g_axCX = 0, g_axCY = 0;
-// Перетаскивание окна/панорама внутри обзора
-inline HWND          g_ovDragHwnd = nullptr;    // перетаскиваемое окно (или nullptr — фон)
-inline POINT         g_ovDragLast = {};
-inline bool          g_ovDragMoved = false;
 const double         ZOOM_MIN = 0.08;           // самый дальний зум-аут
 const double         ZOOM_STEP = 1.07;          // мягкий множитель на один шаг колеса
 const double         ZOOM_EASE = 0.18;
-inline ScopedBitmap  g_ovBmp;
-inline ScopedDC      g_ovMemDC;
-inline int           g_ovCacheW = 0, g_ovCacheH = 0;
-// Обои пользователя для фона обзора (затемняются по мере отдаления)
-inline ScopedGdiplus g_gdi;                     // RAII для Gdiplus
-inline ScopedBitmap  g_wallBmp;
-inline ScopedDC      g_wallDC;
-inline int           g_wallW = 0, g_wallH = 0;
-inline std::wstring  g_wallPath;                // путь загруженных обоев (для отслеживания смены)
-inline DWORD         g_lastWallCap = 0;         // время последнего перечитывания обоев в обзоре
-inline ScopedBitmap  g_blackBmp;
-inline ScopedDC      g_blackDC;                // 1x1 чёрный для мягких теней (AlphaBlend)
-// Троттлинг перерисовки обзора (не каждый кадр, только при изменениях)
-inline double  g_ovLastZoom = -1, g_ovLastAxCX = 0, g_ovLastAxCY = 0, g_ovLastAxWX = 0, g_ovLastAxWY = 0;
 
-// ---------- Перенесённые модульные глобалы ----------
+// Сохранённая раскладка окон (layout.txt)
 struct SavedWin { std::wstring cls, title; RECT world; bool used; };
-inline std::vector<HWND>     g_ovZ;             // z-порядок окон в обзоре
-inline std::vector<SavedWin> g_saved;           // загруженная раскладка
-inline HWINEVENTHOOK g_winEventHook = nullptr;  // hook активации окна
-inline BOOL g_prevWinArranging = TRUE;          // прежнее состояние Aero Snap
-inline HWND g_iconsWin = nullptr;               // окно иконок рабочего стола
-inline bool g_iconsWereVisible = false;
+
+// ---------- Состояние приложения ----------
+// Всё изменяемое состояние собрано в один объект и передаётся в функции по ссылке.
+// Единственный экземпляр создаётся в wWinMain. Некопируем/неперемещаем
+// (содержит std::atomic и RAII-обёртки) — это намеренно.
+struct AppState {
+
+    std::vector<TrackedWin> wins;
+    double camX = 0, camY = 0;          // текущая камера (мировая точка в левом-верхнем углу виртуального экрана)
+    double targetX = 0, targetY = 0;    // целевая камера (для плавной анимации)
+
+    // Виртуальный экран (объединение всех мониторов)
+    int  vsX = 0, vsY = 0, vsW = 0, vsH = 0;
+
+    HWND hud = nullptr;                    // окно миникарты
+    bool hudVisible = true;
+    bool previewsOn = true;                // живые DWM-превью на миникарте
+    int  corner = 1;                       // угол миникарты: 0=ЛВ,1=ПВ,2=ЛН,3=ПН
+    bool hudDrag = false;                  // зажата ЛКМ на миникарте (перетаскивание)
+    int  syncCounter = 0;
+    DWORD lastHudTick = 0, lastSyncTick = 0;  // троттлинг миникарты/синхронизации по времени
+    KeyBind keys[HK_PIN + 1];   // индекс = HK_*
+    HWND settings = nullptr;    // окно настроек горячих клавиш
+    int  capRow = -1;           // строка в режиме перехвата клавиш (или -1)
+    std::wstring status;        // сообщение в окне настроек (конфликт и т.п.)
+    MapXform xform;
+
+    // Панорама средней кнопкой мыши (глобальный hook на отдельном потоке)
+    HHOOK      mouseHook = nullptr;
+    ScopedHandle hookThread;
+    DWORD      hookThreadId = 0;
+    std::atomic_bool dragging = false;
+    POINT      lastMouse = {};
+    std::atomic<long> dragDeltaX = 0;
+    std::atomic<long> dragDeltaY = 0;
+
+    // Отслеживание изменения камеры для троттлинга перерисовки
+    double lastCamX = 1e18, lastCamY = 1e18;
+
+    // Зум-обзор через DWM-превью (зум-аут всего рабочего стола колесом)
+    HWND          ov = nullptr;            // полноэкранное окно обзора
+    bool          overview = false;        // активен ли обзор
+    double        zoom = 1.0;              // текущий масштаб обзора (<=1)
+    double        zoomTarget = 1.0;        // целевой масштаб
+    // Якорь зума: мировая точка axW удерживается в клиентской точке axC
+    double        axWX = 0, axWY = 0, axCX = 0, axCY = 0;
+    // Перетаскивание окна/панорама внутри обзора
+    HWND          ovDragHwnd = nullptr;    // перетаскиваемое окно (или nullptr — фон)
+    POINT         ovDragLast = {};
+    bool          ovDragMoved = false;
+    ScopedBitmap  ovBmp;
+    ScopedDC      ovMemDC;
+    int           ovCacheW = 0, ovCacheH = 0;
+    // Обои пользователя для фона обзора (затемняются по мере отдаления)
+    ScopedGdiplus gdi;                     // RAII для Gdiplus
+    ScopedBitmap  wallBmp;
+    ScopedDC      wallDC;
+    int           wallW = 0, wallH = 0;
+    std::wstring  wallPath;                // путь загруженных обоев (для отслеживания смены)
+    DWORD         lastWallCap = 0;         // время последнего перечитывания обоев в обзоре
+    ScopedBitmap  blackBmp;
+    ScopedDC      blackDC;                // 1x1 чёрный для мягких теней (AlphaBlend)
+    // Троттлинг перерисовки обзора (не каждый кадр, только при изменениях)
+    double  ovLastZoom = -1, ovLastAxCX = 0, ovLastAxCY = 0, ovLastAxWX = 0, ovLastAxWY = 0;
+    std::vector<HWND>     ovZ;             // z-порядок окон в обзоре
+    std::vector<SavedWin> saved;           // загруженная раскладка
+    HWINEVENTHOOK winEventHook = nullptr;  // hook активации окна
+    BOOL prevWinArranging = TRUE;          // прежнее состояние Aero Snap
+    HWND iconsWin = nullptr;               // окно иконок рабочего стола
+    bool iconsWereVisible = false;
+
+    // Кэш GDI-объектов миникарты (перья/кисти создаются один раз)
+    ScopedPen   framePen, pinPen, vpPen;
+    ScopedBrush fillBr;
+
+    AppState() = default;
+    AppState(const AppState&) = delete;
+    AppState& operator=(const AppState&) = delete;
+};
+
+// Единственная точка доступа к состоянию для Win32-колбэков (WndProc, WH_MOUSE_LL,
+// SetWinEventHook, EnumWindows), которым нельзя передать параметр. Устанавливается
+// в wWinMain; вся остальная логика получает AppState& явно.
+inline AppState* g_app = nullptr;
 
 // ---------- Прототипы функций модулей ----------
-bool IsDesktopClass(HWND h);
-void DoZoomFactor(double factor, POINT pt);
-void DoZoom(int delta, POINT pt);
-void PanWheel(double dxDelta, double dyDelta);
+bool IsDesktopClass(AppState& app, HWND h);
+void DoZoomFactor(AppState& app, double factor, POINT pt);
+void DoZoom(AppState& app, int delta, POINT pt);
+void PanWheel(AppState& app, double dxDelta, double dyDelta);
 LRESULT CALLBACK MouseProc(int code, WPARAM wp, LPARAM lp);
 std::string WToUtf8(const std::wstring& w);
 std::wstring Utf8ToW(const std::string& s);
 void WinKey(HWND h, std::wstring& cls, std::wstring& title);
 std::wstring LayoutPath();
-void SaveLayout();
-void LoadLayout();
-void SpreadWindows(const std::vector<int>& idx);
-void ArrangeOnStartup();
-void GatherToDesktop();
-void ComputeWorldBounds(RECT& out);
-void ComputeXform(const RECT& client);
-RECT WorldToClient(const RECT& w);
-void MapToWorld(int mx, int my, double& wx, double& wy);
-void UpdateThumbs(const RECT& client);
+void SaveLayout(AppState& app);
+void LoadLayout(AppState& app);
+void SpreadWindows(AppState& app, const std::vector<int>& idx);
+void ArrangeOnStartup(AppState& app);
+void GatherToDesktop(AppState& app);
+void ComputeWorldBounds(AppState& app, RECT& out);
+void ComputeXform(AppState& app, const RECT& client);
+RECT WorldToClient(AppState& app, const RECT& w);
+void MapToWorld(AppState& app, int mx, int my, double& wx, double& wy);
+void UpdateThumbs(AppState& app, const RECT& client);
 HFONT UiFont();
 RECT GearRect(const RECT& client);
-void DrawMinimap(HDC hdc, const RECT& client);
-double OvClientX(double wx);
-double OvClientY(double wy);
+void DrawMinimap(AppState& app, HDC hdc, const RECT& client);
+double OvClientX(AppState& app, double wx);
+double OvClientY(AppState& app, double wy);
 RECT VisWorld(const TrackedWin& w);
-void LoadWallpaper();
-void ShowOverview();
-void HideOverview();
-void CommitZoomCam();
-void UpdateOverview();
-void EnsureOvCache(HDC ref, int w, int h);
+void LoadWallpaper(AppState& app);
+void ShowOverview(AppState& app);
+void HideOverview(AppState& app);
+void CommitZoomCam(AppState& app);
+void UpdateOverview(AppState& app);
+void EnsureOvCache(AppState& app, HDC ref, int w, int h);
 BOOL CALLBACK WallMonProc(HMONITOR hm, HDC, LPRECT, LPARAM lp);
-void EnsureBlack();
-void DrawShadow(HDC hdc, const RECT& r, int radius);
-void DrawOverview(HDC hdc, const RECT& client);
+void EnsureBlack(AppState& app);
+void DrawShadow(AppState& app, HDC hdc, const RECT& r, int radius);
+void DrawOverview(AppState& app, HDC hdc, const RECT& client);
 LRESULT CALLBACK OvProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 DWORD WINAPI HookThreadProc(LPVOID param);
-void CenterOnCursorMonitor(double wx, double wy);
+void CenterOnCursorMonitor(AppState& app, double wx, double wy);
 void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG, DWORD, DWORD);
-void DisableSnap();
-void RestoreSnap();
+void DisableSnap(AppState& app);
+void RestoreSnap(AppState& app);
 BOOL CALLBACK FindDefViewProc(HWND top, LPARAM lp);
-HWND FindDesktopIcons();
-void HideDesktopIcons();
-void RestoreDesktopIcons();
+HWND FindDesktopIcons(AppState& app);
+void HideDesktopIcons(AppState& app);
+void RestoreDesktopIcons(AppState& app);
 void EnableDpiAwareness();
 void ApplyWin11Style(HWND hwnd);
 std::wstring UiCfgPath();
-void SaveUiCfg();
-void LoadUiCfg();
-void PlaceHud();
-const wchar_t* CornerGlyph();
-void InitDefaultKeys();
-void RegisterAllHotkeys();
-void UnregisterAllHotkeys();
+void SaveUiCfg(AppState& app);
+void LoadUiCfg(AppState& app);
+void PlaceHud(AppState& app);
+const wchar_t* CornerGlyph(AppState& app);
+void InitDefaultKeys(AppState& app);
+void RegisterAllHotkeys(AppState& app);
+void UnregisterAllHotkeys(AppState& app);
 std::wstring HotkeysPath();
-void SaveHotkeys();
-void LoadHotkeys();
+void SaveHotkeys(AppState& app);
+void LoadHotkeys(AppState& app);
 std::wstring KeyName(UINT vk);
 std::wstring KeyComboText(UINT mods, UINT vk);
 bool IsModifierVk(UINT vk);
 UINT CurrentMods();
 int SetFooterY();
-int FindConflict(UINT mods, UINT vk, int exceptId);
+int FindConflict(AppState& app, UINT mods, UINT vk, int exceptId);
 LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
-void OpenSettings();
-void UpdateVirtualScreen();
+void OpenSettings(AppState& app);
+void UpdateVirtualScreen(AppState& app);
 bool IsCloaked(HWND h);
-bool IsManageable(HWND h);
+bool IsManageable(AppState& app, HWND h);
 RECT ComputeVM(HWND h, const RECT& r);
 BOOL CALLBACK EnumProc(HWND h, LPARAM);
-void RegisterThumb(TrackedWin& w);
-void RegisterAllThumbs();
-void RegisterOvThumb(TrackedWin& w);
+void RegisterThumb(AppState& app, TrackedWin& w);
+void RegisterAllThumbs(AppState& app);
+void RegisterOvThumb(AppState& app, TrackedWin& w);
 BOOL CALLBACK OvZProc(HWND h, LPARAM);
-void RegisterAllOvThumbs();
-void RebuildWindowList();
-void SyncWorldFromScreen();
-bool IsTracked(HWND h);
+void RegisterAllOvThumbs(AppState& app);
+void RebuildWindowList(AppState& app);
+void SyncWorldFromScreen(AppState& app);
+bool IsTracked(AppState& app, HWND h);
 BOOL CALLBACK AddNewProc(HWND h, LPARAM);
-void AddNewWindows();
-void RepositionAll();
-void PanBy(double dx, double dy);
-void GoHome();
-void CenterOn(double wx, double wy);
+void AddNewWindows(AppState& app);
+void RepositionAll(AppState& app);
+void PanBy(AppState& app, double dx, double dy);
+void GoHome(AppState& app);
+void CenterOn(AppState& app, double wx, double wy);
+
+
