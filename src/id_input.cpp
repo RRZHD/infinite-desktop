@@ -60,9 +60,11 @@ LRESULT CALLBACK MouseProc(int code, WPARAM wp, LPARAM lp) {
         switch (wp) {
         case WM_MBUTTONDOWN: {
             bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-            // Панораму берём только над пустым столом / в обзоре / по Ctrl+СКМ.
-            // Над окном приложения (Blender, браузер) СКМ уходит в само приложение.
-            if (app.overview || ctrl || IsDesktopClass(app, WindowFromPoint(m->pt))) {
+            // Панораму берём над пустым столом / в обзоре / по Ctrl+СКМ — либо везде,
+            // если включён режим «СКМ в любом окне» (настройки). Иначе над окном
+            // приложения (Blender, браузер) СКМ уходит в само приложение.
+            if (app.overview || ctrl || app.mmbAnywhere.load(std::memory_order_relaxed) ||
+                IsDesktopClass(app, WindowFromPoint(m->pt))) {
                 app.dragDeltaX.store(0, std::memory_order_relaxed);
                 app.dragDeltaY.store(0, std::memory_order_relaxed);
                 app.dragging.store(true, std::memory_order_release);

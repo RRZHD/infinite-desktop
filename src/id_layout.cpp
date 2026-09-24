@@ -143,6 +143,56 @@ void ArrangeOnStartup(AppState& app) {
     SpreadWindows(app, toSpread);
 }
 
+// ---------- Закладки камеры («рабочие места» на бесконечном холсте) ----------
+// Бесконечный стол делит на «рабочие места» сама камера: закладка — это точка
+// холста, куда можно вернуться одним хоткеем. Хранятся рядом с раскладкой.
+std::wstring MarksPath() {
+    wchar_t buf[MAX_PATH] = {};
+    DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH);
+    std::wstring dir = (n && n < MAX_PATH) ? std::wstring(buf) : L".";
+    dir += L"\\InfiniteDesktop";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    return dir + L"\\marks.txt";
+}
+
+void SaveMarks(AppState& app) {
+    std::ofstream f(MarksPath().c_str(), std::ios::binary | std::ios::trunc);
+    if (!f) return;
+    for (int i = 0; i < MARK_COUNT; ++i) {
+        if (!app.marks[i].set) continue;
+        std::string line = std::to_string(i) + " " + std::to_string((long long)llround(app.marks[i].x))
+                         + " " + std::to_string((long long)llround(app.marks[i].y)) + "\n";
+        f.write(line.data(), (std::streamsize)line.size());
+    }
+}
+
+void LoadMarks(AppState& app) {
+    std::ifstream f(MarksPath().c_str(), std::ios::binary);
+    if (!f) return;
+    std::string line;
+    while (std::getline(f, line)) {
+        std::istringstream iss(line);
+        int i; long long x, y;
+        if ((iss >> i >> x >> y) && i >= 0 && i < MARK_COUNT)
+            app.marks[i] = { (double)x, (double)y, true };
+    }
+}
+
+// Запомнить текущую (целевую) позицию камеры — не промежуточную точку анимации.
+void SetMark(AppState& app, int i) {
+    if (i < 0 || i >= MARK_COUNT) return;
+    app.marks[i] = { app.targetX, app.targetY, true };
+    SaveMarks(app);
+}
+
+// Плавно перелететь к закладке (через ту же анимацию, что и клик по миникарте).
+// В обзоре камера живёт в якоре зума — там закладки не применяем.
+void GotoMark(AppState& app, int i) {
+    if (i < 0 || i >= MARK_COUNT || !app.marks[i].set || app.overview) return;
+    app.targetX = app.marks[i].x;
+    app.targetY = app.marks[i].y;
+}
+
 // При выходе: собрать окна на видимый рабочий стол (в рабочую область монитора).
 void GatherToDesktop(AppState& app) {
     for (auto& w : app.wins) {

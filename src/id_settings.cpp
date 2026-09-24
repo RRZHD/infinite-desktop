@@ -29,13 +29,20 @@ std::wstring UiCfgPath() {
 }
 void SaveUiCfg(AppState& app) {
     std::ofstream f(UiCfgPath().c_str(), std::ios::binary | std::ios::trunc);
-    if (f) { std::string s = "corner " + std::to_string(app.corner) + "\n"; f.write(s.data(), s.size()); }
+    if (f) {
+        std::string s = "corner " + std::to_string(app.corner) + "\n"
+                      + "mmb "    + std::to_string(app.mmbAnywhere.load() ? 1 : 0) + "\n";
+        f.write(s.data(), s.size());
+    }
 }
 void LoadUiCfg(AppState& app) {
     std::ifstream f(UiCfgPath().c_str(), std::ios::binary);
     if (!f) return;
     std::string key; int v;
-    while (f >> key >> v) if (key == "corner" && v >= 0 && v <= 3) app.corner = v;
+    while (f >> key >> v) {
+        if (key == "corner" && v >= 0 && v <= 3) app.corner = v;
+        if (key == "mmb")                        app.mmbAnywhere.store(v != 0);
+    }
 }
 
 // Разместить миникарту в выбранном углу рабочей области основного монитора.
@@ -62,14 +69,28 @@ void InitDefaultKeys(AppState& app) {
     app.keys[HK_QUIT]    = { MOD_CONTROL | MOD_ALT, 'Q',      L"Выход" };
     app.keys[HK_PREVIEW] = { MOD_CONTROL | MOD_ALT, 'P',      L"Превью вкл/выкл" };
     app.keys[HK_PIN]     = { MOD_CONTROL | MOD_ALT, 'F',      L"Закрепить окно" };
+    // Направленный фокус. Не Ctrl+Стрелки: это перемещение по словам в любом
+    // текстовом поле, глобальный хоткей сломал бы редактирование везде.
+    const UINT CAS = MOD_CONTROL | MOD_ALT | MOD_SHIFT;
+    app.keys[HK_FOCUS_LEFT]  = { CAS, VK_LEFT,  L"Фокус: окно слева" };
+    app.keys[HK_FOCUS_RIGHT] = { CAS, VK_RIGHT, L"Фокус: окно справа" };
+    app.keys[HK_FOCUS_UP]    = { CAS, VK_UP,    L"Фокус: окно сверху" };
+    app.keys[HK_FOCUS_DOWN]  = { CAS, VK_DOWN,  L"Фокус: окно снизу" };
+    // Закладки камеры: запомнить — с Shift, вернуться — без.
+    static const wchar_t* MARK_NAMES[MARK_COUNT] = { L"Запомнить место 1", L"Запомнить место 2", L"Запомнить место 3", L"Запомнить место 4" };
+    static const wchar_t* GOTO_NAMES[MARK_COUNT] = { L"Перейти к месту 1", L"Перейти к месту 2", L"Перейти к месту 3", L"Перейти к месту 4" };
+    for (int i = 0; i < MARK_COUNT; ++i) {
+        app.keys[HK_MARK1 + i] = { CAS,                     (UINT)('1' + i), MARK_NAMES[i] };
+        app.keys[HK_GOTO1 + i] = { MOD_CONTROL | MOD_ALT,   (UINT)('1' + i), GOTO_NAMES[i] };
+    }
 }
 
 void RegisterAllHotkeys(AppState& app) {
-    for (int id = HK_LEFT; id <= HK_PIN; ++id)
+    for (int id = HK_LEFT; id <= HK_LAST; ++id)
         RegisterHotKey(app.hud, id, app.keys[id].mods, app.keys[id].vk);
 }
 void UnregisterAllHotkeys(AppState& app) {
-    for (int id = HK_LEFT; id <= HK_PIN; ++id) UnregisterHotKey(app.hud, id);
+    for (int id = HK_LEFT; id <= HK_LAST; ++id) UnregisterHotKey(app.hud, id);
 }
 
 std::wstring HotkeysPath() {
@@ -83,7 +104,7 @@ std::wstring HotkeysPath() {
 void SaveHotkeys(AppState& app) {
     std::ofstream f(HotkeysPath().c_str(), std::ios::binary | std::ios::trunc);
     if (!f) return;
-    for (int id = HK_LEFT; id <= HK_PIN; ++id) {
+    for (int id = HK_LEFT; id <= HK_LAST; ++id) {
         std::string line = std::to_string(id) + " " + std::to_string(app.keys[id].mods)
                          + " " + std::to_string(app.keys[id].vk) + "\n";
         f.write(line.data(), (std::streamsize)line.size());
@@ -96,7 +117,7 @@ void LoadHotkeys(AppState& app) {
     while (std::getline(f, line)) {
         std::istringstream iss(line);
         int id, mods, vk;
-        if ((iss >> id >> mods >> vk) && id >= HK_LEFT && id <= HK_PIN) {
+        if ((iss >> id >> mods >> vk) && id >= HK_LEFT && id <= HK_LAST) {
             app.keys[id].mods = (UINT)mods;
             app.keys[id].vk   = (UINT)vk;
         }
@@ -146,11 +167,11 @@ UINT CurrentMods() {
     return m;
 }
 
-int SetFooterY() { return SET_HEADER + (HK_PIN - HK_LEFT + 1) * SET_ROW + 10; }
+int SetFooterY() { return SET_HEADER + (HK_LAST - HK_LEFT + 1) * SET_ROW + 10; }
 
 // Найти другое действие с тем же сочетанием (или -1).
 int FindConflict(AppState& app, UINT mods, UINT vk, int exceptId) {
-    for (int id = HK_LEFT; id <= HK_PIN; ++id)
+    for (int id = HK_LEFT; id <= HK_LAST; ++id)
         if (id != exceptId && app.keys[id].mods == mods && app.keys[id].vk == vk) return id;
     return -1;
 }
@@ -172,7 +193,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         RECT hr = { 14, 10, rc.right - 14, SET_HEADER };
         DrawTextW(h, L"Горячие клавиши\nКлик по сочетанию → нажмите новое (Esc — отмена)",
                   -1, &hr, DT_LEFT | DT_NOPREFIX);
-        for (int id = HK_LEFT; id <= HK_PIN; ++id) {
+        for (int id = HK_LEFT; id <= HK_LAST; ++id) {
             int y = SET_HEADER + (id - HK_LEFT) * SET_ROW;
             SetTextColor(h, RGB(190, 196, 208));
             RECT nr = { 14, y, SET_BOX_X - 6, y + SET_ROW };
@@ -193,8 +214,13 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SetTextColor(h, RGB(190, 196, 208));
         std::wstring ct = std::wstring(L"Угол миникарты: ") + CornerGlyph(app) + L"   (клик — сменить)";
         DrawTextW(h, ct.c_str(), -1, &crn, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        RECT mr = { 14, SetFooterY() + 56, rc.right - 14, SetFooterY() + 80 };
+        bool mmb = app.mmbAnywhere.load();
+        SetTextColor(h, mmb ? RGB(140, 220, 160) : RGB(190, 196, 208));
+        std::wstring mt = std::wstring(L"СКМ двигает холст в любом окне: ") + (mmb ? L"вкл" : L"выкл") + L"   (клик — сменить)";
+        DrawTextW(h, mt.c_str(), -1, &mr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         if (!app.status.empty()) {
-            RECT sr = { 14, SetFooterY() + 56, rc.right - 14, SetFooterY() + 78 };
+            RECT sr = { 14, SetFooterY() + 84, rc.right - 14, SetFooterY() + 106 };
             SetTextColor(h, RGB(255, 180, 90));
             DrawTextW(h, app.status.c_str(), -1, &sr,
                       DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
@@ -221,8 +247,15 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             app.capRow = -1; app.status.clear(); InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
+        // СКМ в любом окне вкл/выкл
+        if (y >= SetFooterY() + 56 && y <= SetFooterY() + 80 && x >= 14) {
+            app.mmbAnywhere.store(!app.mmbAnywhere.load());
+            SaveUiCfg(app);
+            app.capRow = -1; app.status.clear(); InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
         app.capRow = -1; app.status.clear();
-        for (int id = HK_LEFT; id <= HK_PIN; ++id) {
+        for (int id = HK_LEFT; id <= HK_LAST; ++id) {
             int by = SET_HEADER + (id - HK_LEFT) * SET_ROW + 2;
             if (x >= SET_BOX_X && x <= SET_BOX_X + SET_BOX_W && y >= by && y <= by + SET_BOX_H) {
                 app.capRow = id; break;
@@ -270,6 +303,17 @@ void OpenSettings(AppState& app) {
     RECT hr; GetWindowRect(app.hud, &hr);
     int w = cr.right - cr.left, hgt = cr.bottom - cr.top;
     int x = hr.right - w, yy = hr.bottom + 6;
+    // Окно стало высоким (22 ряда) — не даём ему уехать за экран. Держим в рабочей
+    // области монитора миникарты: не помещается под картой — ставим над ней, не
+    // помещается и так — прижимаем к краю.
+    MONITORINFO mi = { sizeof(mi) };
+    if (GetMonitorInfoW(MonitorFromWindow(app.hud, MONITOR_DEFAULTTONEAREST), &mi)) {
+        const RECT& wa = mi.rcWork;
+        if (yy + hgt > wa.bottom) yy = hr.top - 6 - hgt;
+        if (yy < wa.top) yy = max(wa.top, wa.bottom - hgt);
+        if (x + w > wa.right) x = wa.right - w;
+        if (x < wa.left) x = wa.left;
+    }
     SetWindowPos(app.settings, HWND_TOPMOST, x, yy, w, hgt, SWP_SHOWWINDOW);
     SetForegroundWindow(app.settings);
     app.capRow = -1;

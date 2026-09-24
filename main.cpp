@@ -23,7 +23,9 @@
 #include "src/id_common.h"   // типы, inline-глобалы, прототипы (модули — отдельные .cpp)
 
 // ---------- Кадр анимации и точка входа ----------
-static void FrameTick(AppState& app, double dt) {
+// Возвращает true, если кадр обзора уже показан с ожиданием vblank (EndDraw) —
+// тогда цикл не должен ждать композицию ещё раз через DwmFlush.
+static bool FrameTick(AppState& app, double dt) {
     bool dragging = app.dragging.load(std::memory_order_acquire);
     long dragDx = app.dragDeltaX.exchange(0, std::memory_order_acq_rel);
     long dragDy = app.dragDeltaY.exchange(0, std::memory_order_acq_rel);
@@ -64,9 +66,12 @@ static void FrameTick(AppState& app, double dt) {
                 app.lastWallCap = GetTickCount();
                 if (WallpaperFileChanged(app)) {
                     LoadWallpaper(app);
-                    InvalidateRect(app.ov, nullptr, FALSE);
+                    app.ovLastZoom = -1;          // форсировать перерисовку в этом же кадре
                 }
             }
+            // Окна, открытые кликами из обзора (диалоги, новые окна), подхватываем и здесь —
+            // обычная фоновая синхронизация в обзоре не выполняется.
+            if (GetTickCount() - app.lastSyncTick >= 300) { app.lastSyncTick = GetTickCount(); AddNewWindows(app); }
             // перерисовываем обзор только при изменениях (зум/панорама/перетаскивание)
             bool ovChanged = (app.zoom != app.ovLastZoom || app.axCX != app.ovLastAxCX ||
                               app.axCY != app.ovLastAxCY || app.axWX != app.ovLastAxWX ||
@@ -74,9 +79,11 @@ static void FrameTick(AppState& app, double dt) {
             if (ovChanged) {
                 app.ovLastZoom = app.zoom; app.ovLastAxCX = app.axCX; app.ovLastAxCY = app.axCY;
                 app.ovLastAxWX = app.axWX; app.ovLastAxWY = app.axWY;
-                UpdateOverview(app);
+                UpdateOverview(app);            // превью (DWM) — на новые места
+                RenderOverview(app, app.ov);    // фон и тени — сразу, в тот же кадр; ждёт vblank
+                return true;
             }
-            return;
+            return false;
         }
     }
 
@@ -155,10 +162,18 @@ static void FrameTick(AppState& app, double dt) {
             }
         }
     }
+    return false;
 }
 
 // ---------- main ----------
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
+    // COM нужен WIC (декод обоев для Direct2D). Объявлен ДО AppState: локальные объекты
+    // уничтожаются в обратном порядке, так что COM-объекты состояния освободятся
+    // раньше CoUninitialize.
+    struct ScopedCom {
+        ScopedCom()  { CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED); }
+        ~ScopedCom() { CoUninitialize(); }
+    } com;
     AppState app;          // единственный экземпляр состояния
     g_app = &app;          // для Win32-колбэков
     EnableDpiAwareness();
@@ -166,6 +181,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     DisableSnap(app);          // на бесконечном столе краёв нет — выключаем Aero Snap
     HideDesktopIcons(app);     // убираем ярлыки рабочего стола на время работы
 
+    InitGraphics(app);    // фабрики Direct2D / DirectWrite / WIC (один раз на процесс)
     LoadWallpaper(app);   // обои пользователя для фона обзора
 
     // Класс и окно полноэкранного обзора (зум), пока скрыто
@@ -220,6 +236,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
     RebuildWindowList(app);
     LoadLayout(app);          // прошлая раскладка (если есть)
+    LoadMarks(app);           // закладки камеры (если есть)
     ArrangeOnStartup(app);    // вернуть сохранённые / разложить новые без наложения
     RepositionAll(app);       // применить расстановку
     {
@@ -279,8 +296,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
                       fabs(app.zoomTarget - app.zoom) > 0.001;
         if (active) {
             prev = now;
-            FrameTick(app, dt);
-            if (dwmOk) {
+            // Кадр обзора уже показан через EndDraw с ожиданием vblank — второй раз
+            // (DwmFlush) не ждём, иначе получали бы каждый второй кадр.
+            bool presented = FrameTick(app, dt);
+            if (presented) {
+                // пейсинг задал EndDraw
+            } else if (dwmOk) {
                 DwmFlush();                      // до следующей композиции DWM (vblank)
             } else {
                 // Запасной путь: ждём до абсолютного дедлайна now + TARGET с учётом

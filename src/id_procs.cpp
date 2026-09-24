@@ -108,6 +108,14 @@ LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         }
         case HK_QUIT:    PostQuitMessage(0); break;
+        case HK_FOCUS_LEFT:  FocusDir(app, -1,  0); break;
+        case HK_FOCUS_RIGHT: FocusDir(app,  1,  0); break;
+        case HK_FOCUS_UP:    FocusDir(app,  0, -1); break;
+        case HK_FOCUS_DOWN:  FocusDir(app,  0,  1); break;
+        default:
+            if (wp >= HK_MARK1 && wp <= HK_MARK4) SetMark(app,  (int)(wp - HK_MARK1));
+            if (wp >= HK_GOTO1 && wp <= HK_GOTO4) GotoMark(app, (int)(wp - HK_GOTO1));
+            break;
         }
         return 0;
     }

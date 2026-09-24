@@ -267,6 +267,62 @@ void RepositionAll(AppState& app) {
     }
 }
 
+// Активировать чужое окно из обработчика хоткея. SetForegroundWindow разрешён не всегда
+// (foreground lock); на этот случай временно присоединяем ввод к потоку текущего
+// активного окна — классический приём. К зависшему потоку не присоединяемся.
+static void ForceForeground(HWND h) {
+    HWND cur = GetForegroundWindow();
+    DWORD me = GetCurrentThreadId();
+    DWORD other = cur ? GetWindowThreadProcessId(cur, nullptr) : 0;
+    bool attach = other && other != me && !IsHungAppWindow(cur);
+    if (attach) AttachThreadInput(me, other, TRUE);
+    BringWindowToTop(h);
+    SetForegroundWindow(h);
+    if (attach) AttachThreadInput(me, other, FALSE);
+}
+
+// Направленное переключение фокуса: ближайшее окно в сторону (dx,dy) от активного
+// (если активно не отслеживаемое окно — от центра экрана). Кандидаты — только окна
+// «впереди» по направлению; из них берём то, что ближе всего по курсу: отклонение
+// вбок штрафуется вдвое, чтобы прямо стоящее окно выигрывало у чуть более близкого
+// по диагонали. Если окно не целиком в кадре — камера подъезжает к нему.
+void FocusDir(AppState& app, int dx, int dy) {
+    if (app.overview || app.wins.empty()) return;
+    HWND fg = GetForegroundWindow();
+    double ox = 0, oy = 0; bool fromWin = false;
+    for (auto& w : app.wins) if (w.hwnd == fg) {
+        ox = (w.world.left + w.world.right) / 2.0; oy = (w.world.top + w.world.bottom) / 2.0;
+        fromWin = true; break;
+    }
+    if (!fromWin) {
+        fg = nullptr;
+        ox = app.camX + app.vsX + app.vsW / 2.0;
+        oy = app.camY + app.vsY + app.vsH / 2.0;
+    }
+    TrackedWin* best = nullptr; double bestScore = 0;
+    for (auto& w : app.wins) {
+        if (w.hwnd == fg || !IsWindow(w.hwnd) || IsIconic(w.hwnd)) continue;
+        double cx = (w.world.left + w.world.right) / 2.0 - ox;
+        double cy = (w.world.top + w.world.bottom) / 2.0 - oy;
+        double fwd = cx * dx + cy * dy;              // вдоль направления
+        if (fwd <= 0) continue;                      // только впереди
+        double lat = fabs(cx * dy - cy * dx);        // поперёк
+        double score = fwd + 2.0 * lat;
+        if (!best || score < bestScore) { best = &w; bestScore = score; }
+    }
+    if (!best) return;
+    ForceForeground(best->hwnd);
+    // Показать целиком. WinEventProc подъезжает только к окнам, которых не видно
+    // вовсе; здесь же пользователь явно попросил это окно — довезём и частично видимое.
+    LONG cx = (LONG)llround(app.camX), cy = (LONG)llround(app.camY);
+    RECT s = { best->world.left - cx, best->world.top - cy, best->world.right - cx, best->world.bottom - cy };
+    bool whole = s.left >= app.vsX && s.top >= app.vsY &&
+                 s.right <= app.vsX + app.vsW && s.bottom <= app.vsY + app.vsH;
+    if (!whole)
+        CenterOnCursorMonitor(app, (best->world.left + best->world.right) / 2.0,
+                                   (best->world.top + best->world.bottom) / 2.0);
+}
+
 void PanBy(AppState& app, double dx, double dy) { app.targetX += dx; app.targetY += dy; }
 void GoHome(AppState& app) { app.targetX = 0; app.targetY = 0; }
 
