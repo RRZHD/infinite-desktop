@@ -86,12 +86,18 @@ RECT GearRect(const RECT& client) {
 // ---------- Отрисовка миникарты (фон, бордюры, вьюпорт) ----------
 // DWM рисует превью ПОВЕРХ этого GDI-содержимого, поэтому бордюры окон
 // делаем чуть шире рамки превью, а рамку вьюпорта — поверх пустых зон.
+// Цвета — из темы (акцент и нейтрали Windows). При смене темы ResetMapGdi сбрасывает
+// кэш, и объекты пересоздаются уже в новых цветах.
 static void EnsureMapGdi(AppState& app) {
-    if (!app.framePen) app.framePen.reset(CreatePen(PS_SOLID, 1, RGB(90, 110, 140)));
-    if (!app.fillBr)   app.fillBr.reset(CreateSolidBrush(RGB(70, 130, 200)));
-    if (!app.mapBg)    app.mapBg.reset(CreateSolidBrush(RGB(20, 22, 28)));
-    if (!app.pinPen)   app.pinPen.reset(CreatePen(PS_SOLID, 2, RGB(255, 170, 60)));
-    if (!app.vpPen)    app.vpPen.reset(CreatePen(PS_SOLID, 2, RGB(255, 200, 60)));
+    const Theme& T = app.theme;
+    if (!app.framePen) app.framePen.reset(CreatePen(PS_SOLID, 1, UiMix(T.accent, T.bg, 0.30f)));
+    if (!app.fillBr)   app.fillBr.reset(CreateSolidBrush(UiMix(T.accent, T.bg, 0.55f)));
+    if (!app.mapBg)    app.mapBg.reset(CreateSolidBrush(T.bg));
+    if (!app.pinPen)   app.pinPen.reset(CreatePen(PS_SOLID, 2, T.warning));
+    if (!app.vpPen)    app.vpPen.reset(CreatePen(PS_SOLID, 2, T.accent));
+}
+void ResetMapGdi(AppState& app) {
+    app.framePen.reset(); app.fillBr.reset(); app.mapBg.reset(); app.pinPen.reset(); app.vpPen.reset();
 }
 
 // Постоянный задний буфер миникарты. Раньше на каждый WM_PAINT (до 60 раз/с при
@@ -143,7 +149,7 @@ void DrawMinimap(AppState& app, HDC hdc, const RECT& client) {
 
     SetBkMode(hdc, TRANSPARENT);
     HGDIOBJ oldFont = SelectObject(hdc, UiFont());
-    SetTextColor(hdc, RGB(175, 185, 200));
+    SetTextColor(hdc, app.theme.muted);
     const wchar_t* tip = L"ЛКМ — перелёт · ⚙ — настройки";
     TextOutW(hdc, 12, client.bottom - 22, tip, lstrlenW(tip));
     SelectObject(hdc, oldFont);
@@ -153,7 +159,7 @@ void DrawMinimap(AppState& app, HDC hdc, const RECT& client) {
         DEFAULT_CHARSET, 0, 0, 0, 0, L"Segoe UI Symbol"));
     RECT gr = GearRect(client);
     HGDIOBJ of = SelectObject(hdc, gearFont);
-    SetTextColor(hdc, RGB(180, 190, 205));
+    SetTextColor(hdc, app.theme.muted);
     DrawTextW(hdc, L"⚙", -1, &gr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     SelectObject(hdc, of);
 }

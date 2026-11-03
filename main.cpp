@@ -182,6 +182,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     HideDesktopIcons(app);     // убираем ярлыки рабочего стола на время работы
 
     InitGraphics(app);    // фабрики Direct2D / DirectWrite / WIC (один раз на процесс)
+    InitUi(app);          // шрифты DirectWrite и тема (цвета Windows)
     LoadWallpaper(app);   // обои пользователя для фона обзора
 
     // Класс и окно полноэкранного обзора (зум), пока скрыто
@@ -211,9 +212,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         0, 0, MAP_W, MAP_H,
         nullptr, nullptr, hInst, nullptr);
     SetLayeredWindowAttributes(app.hud, 0, HUD_ALPHA, LWA_ALPHA);  // полупрозрачность
-    ApplyWin11Style(app.hud);
+    ApplyWin11Style(app, app.hud);
     LoadUiCfg(app);   // сохранённый угол миникарты
     PlaceHud(app);    // разместить в выбранном углу
+    // Иконка в трее: настройки, переключатели, выход. Переживает перезапуск Explorer.
+    app.taskbarCreatedMsg = RegisterWindowMessageW(L"TaskbarCreated");
+    AddTrayIcon(app);
 
     // Окно настроек горячих клавиш (скрыто; открывается по шестерёнке)
     WNDCLASSW stc = {};
@@ -222,13 +226,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     stc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     stc.lpszClassName = L"InfiniteDesktopSettings";
     RegisterClassW(&stc);
+    // Непрозрачное: рисуется Direct2D (сглаженные скругления, кольцо фокуса).
     app.settings = CreateWindowExW(
-        WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED,
-        stc.lpszClassName, L"Горячие клавиши",
+        WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+        stc.lpszClassName, L"Настройки",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
         120, 120, SET_W, 480, nullptr, nullptr, hInst, nullptr);
-    SetLayeredWindowAttributes(app.settings, 0, SETTINGS_ALPHA, LWA_ALPHA);  // полупрозрачность
-    ApplyWin11Style(app.settings);
+    ApplyWin11Style(app, app.settings);
 
     InitDefaultKeys(app);      // значения по умолчанию
     LoadHotkeys(app);          // переопределение из файла (если есть)
@@ -334,6 +338,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     SaveLayout(app);            // запомнить мировые позиции на следующий запуск
     GatherToDesktop(app);       // окна возвращаются на видимый стол
 
+    RemoveTrayIcon(app);
     if (app.settings) DestroyWindow(app.settings);
     if (app.ov)      DestroyWindow(app.ov);
     return 0;

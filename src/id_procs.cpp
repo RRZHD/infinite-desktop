@@ -6,6 +6,10 @@
 // ---------- Оконная процедура HUD ----------
 LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     AppState& app = *g_app;
+    if (msg == WM_TRAY) { OnTrayMessage(app, wp, lp); return 0; }
+    if (app.taskbarCreatedMsg && msg == app.taskbarCreatedMsg) {   // Explorer перезапустился
+        app.trayAdded = false; AddTrayIcon(app); return 0;
+    }
     switch (msg) {
     case WM_PAINT: {
         PAINTSTRUCT ps;
@@ -59,18 +63,14 @@ LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_SETTINGCHANGE:
         if (lp && !lstrcmpW((LPCWSTR)lp, L"Control Panel\\Desktop")) LoadWallpaper(app);
+        if (lp && !lstrcmpW((LPCWSTR)lp, L"ImmersiveColorSet")) OnThemeChanged(app);   // светлая/тёмная, акцент
+        break;
+    case WM_DWMCOLORIZATIONCOLORCHANGED:
+        OnThemeChanged(app);
         break;
     case WM_HOTKEY: {
         if (app.capRow >= HK_LEFT) {   // окно настроек ждёт сочетание — перехватываем
-            UINT mods = LOWORD(lp), vk = HIWORD(lp);
-            int conflict = FindConflict(app, mods, vk, app.capRow);
-            if (conflict != -1) {    // уже занято другим действием — предупреждаем, не применяем
-                app.status = L"⚠ " + KeyComboText(mods, vk) + L" уже занято: " + app.keys[conflict].name;
-            } else {
-                app.keys[app.capRow].mods = mods; app.keys[app.capRow].vk = vk;
-                app.capRow = -1; app.status.clear();
-                UnregisterAllHotkeys(app); RegisterAllHotkeys(app); SaveHotkeys(app);
-            }
+            ApplyCapture(app, LOWORD(lp), HIWORD(lp));   // конфликт/не цифра — причина в status
             if (app.settings) InvalidateRect(app.settings, nullptr, FALSE);
             return 0;
         }
@@ -81,25 +81,8 @@ LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case HK_DOWN:    PanBy(app, 0,  PAN_STEP); break;
         case HK_HOME:    GoHome(app); break;
         case HK_REFRESH: RebuildWindowList(app); RepositionAll(app); break;
-        case HK_MAP:
-            app.hudVisible = !app.hudVisible;
-            if (app.hudVisible) { RegisterAllThumbs(app); ShowWindow(app.hud, SW_SHOWNA); }
-            else {
-                // RAII: ScopedThumbnail очистит превью при reset().
-                for (auto& w : app.wins) w.thumb.reset();
-                ShowWindow(app.hud, SW_HIDE);
-                if (app.settings) ShowWindow(app.settings, SW_HIDE);  // шестерёнка скрывается с картой
-            }
-            break;
-        case HK_PREVIEW:
-            app.previewsOn = !app.previewsOn;
-            if (app.previewsOn) { if (app.hudVisible) RegisterAllThumbs(app); }
-            else {
-                // RAII: ScopedThumbnail очистит превью при reset().
-                for (auto& w : app.wins) w.thumb.reset();
-            }
-            InvalidateRect(app.hud, nullptr, FALSE);
-            break;
+        case HK_MAP:     ToggleMinimap(app); break;    // общие с меню трея
+        case HK_PREVIEW: TogglePreviews(app); break;
         case HK_PIN: {
             // закрепить/открепить активное окно (не двигается с панорамой)
             HWND fg = GetForegroundWindow();
@@ -113,8 +96,8 @@ LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case HK_FOCUS_UP:    FocusDir(app,  0, -1); break;
         case HK_FOCUS_DOWN:  FocusDir(app,  0,  1); break;
         default:
-            if (wp >= HK_MARK1 && wp <= HK_MARK4) SetMark(app,  (int)(wp - HK_MARK1));
-            if (wp >= HK_GOTO1 && wp <= HK_GOTO4) GotoMark(app, (int)(wp - HK_GOTO1));
+            if (wp >= HK_MARK1 && wp <= HK_MARK9) SetMark(app,  (int)(wp - HK_MARK1));
+            if (wp >= HK_GOTO1 && wp <= HK_GOTO9) GotoMark(app, (int)(wp - HK_GOTO1));
             break;
         }
         return 0;
@@ -150,16 +133,27 @@ DWORD WINAPI HookThreadProc(LPVOID param) {
 
 // Центрировать мировую точку по центру монитора, где сейчас курсор (там, где
 // окно «вызывается»), а не по центру всех мониторов.
-void CenterOnCursorMonitor(AppState& app, double wx, double wy) {
+// Подвезти камеру так, чтобы окно оказалось в рабочей области монитора под курсором
+// (там, где его «вызвали» — панель задач, Alt+Tab, фокус стрелками). Вписываем ВИДИМУЮ
+// рамку окна в rcWork, а не центр окна в центр монитора: окно, подогнанное под рабочую
+// область, при центрировании по монитору уезжало вниз на полвысоты панели задач — сверху
+// оставалась пустая полоса. По каждой оси: меньше рабочей области — по центру, иначе —
+// к её краю (верхнему/левому).
+void BringWindowIntoView(AppState& app, const TrackedWin& w) {
+    RECT vw = VisWorld(w);
     POINT pt;
-    if (!GetCursorPos(&pt)) { CenterOn(app, wx, wy); return; }
     MONITORINFO mi = { sizeof(mi) };
-    if (GetMonitorInfoW(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), &mi)) {
-        app.targetX = wx - (mi.rcMonitor.left + mi.rcMonitor.right) / 2.0;
-        app.targetY = wy - (mi.rcMonitor.top  + mi.rcMonitor.bottom) / 2.0;
-    } else {
-        CenterOn(app, wx, wy);
+    if (!GetCursorPos(&pt) || !GetMonitorInfoW(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), &mi)) {
+        CenterOn(app, (vw.left + vw.right) / 2.0, (vw.top + vw.bottom) / 2.0);
+        return;
     }
+    const RECT& wa = mi.rcWork;
+    double ww = vw.right - vw.left,  wh = vw.bottom - vw.top;
+    double waW = wa.right - wa.left, waH = wa.bottom - wa.top;
+    double sx = (ww < waW) ? wa.left + (waW - ww) / 2.0 : (double)wa.left;   // экранный left видимой рамки
+    double sy = (wh < waH) ? wa.top  + (waH - wh) / 2.0 : (double)wa.top;    // экранный top
+    app.targetX = vw.left - sx;   // экран = мир − камера
+    app.targetY = vw.top  - sy;
 }
 
 void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd,
@@ -198,9 +192,7 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd,
         // которые целиком за пределами всех мониторов.
         bool visible = (s.left < app.vsX + app.vsW && s.right > app.vsX &&
                         s.top  < app.vsY + app.vsH && s.bottom > app.vsY);
-        if (!visible)
-            CenterOnCursorMonitor(app, (w.world.left + w.world.right) / 2.0,
-                                  (w.world.top + w.world.bottom) / 2.0);   // подъехать к окну
+        if (!visible) BringWindowIntoView(app, w);   // подъехать к окну
         return;
     }
 }

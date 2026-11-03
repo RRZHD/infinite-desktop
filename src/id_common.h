@@ -11,6 +11,7 @@
 #include <d2d1.h>
 #include <dwrite.h>
 #include <wincodec.h>
+#include <shellapi.h>
 #include <wrl/client.h>
 #include <vector>
 #include <string>
@@ -29,6 +30,8 @@
 #pragma comment(lib, "dwrite.lib")
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "advapi32.lib")
 
 #ifndef SPI_GETWINARRANGING
 #define SPI_GETWINARRANGING 0x0082
@@ -165,7 +168,7 @@ struct TrackedWin {
     POINT           parkedPos = {};    // куда именно поставили при парковке (детекция чужих сдвигов)
 };
 const int   MAP_W = 420, MAP_H = 260, MAP_MARGIN = 16;
-const BYTE  HUD_ALPHA = 224, SETTINGS_ALPHA = 238;  // полупрозрачность
+const BYTE  HUD_ALPHA = 224;   // полупрозрачность миникарты (окно настроек непрозрачно — Direct2D)
 
 // Хоткеи
 enum {
@@ -173,12 +176,13 @@ enum {
     HK_HOME, HK_MAP, HK_REFRESH, HK_QUIT, HK_PREVIEW, HK_PIN,
     // Направленный фокус: активировать ближайшее окно в сторону от активного
     HK_FOCUS_LEFT, HK_FOCUS_RIGHT, HK_FOCUS_UP, HK_FOCUS_DOWN,
-    // Закладки камеры («рабочие места» на холсте): запомнить / вернуться
-    HK_MARK1, HK_MARK2, HK_MARK3, HK_MARK4,
-    HK_GOTO1, HK_GOTO2, HK_GOTO3, HK_GOTO4,
-    HK_LAST = HK_GOTO4
+    // Закладки камеры («рабочие места» на холсте): запомнить / вернуться. В настройках —
+    // две групповые строки (модификаторы + цифра 1…9), регистрируются все 18 хоткеев.
+    HK_MARK1, HK_MARK2, HK_MARK3, HK_MARK4, HK_MARK5, HK_MARK6, HK_MARK7, HK_MARK8, HK_MARK9,
+    HK_GOTO1, HK_GOTO2, HK_GOTO3, HK_GOTO4, HK_GOTO5, HK_GOTO6, HK_GOTO7, HK_GOTO8, HK_GOTO9,
+    HK_LAST = HK_GOTO9
 };
-const int MARK_COUNT = 4;
+const int MARK_COUNT = 9;
 struct CamMark { double x = 0, y = 0; bool set = false; };
 const double PAN_STEP = 400.0;   // шаг панорамы в пикселях мира
 const double EASE     = 0.22;    // коэффициент сглаживания камеры
@@ -186,8 +190,17 @@ const double EASE     = 0.22;    // коэффициент сглаживани�
 // Настраиваемые горячие клавиши (сохраняются между сеансами)
 struct KeyBind { UINT mods; UINT vk; const wchar_t* name; };
 // Геометрия окна настроек
-const int SET_W = 400, SET_HEADER = 52, SET_ROW = 26, SET_FOOTER = 118;  // 26: 22 рядов влезают в 768p
-const int SET_BOX_X = 210, SET_BOX_W = 170, SET_BOX_H = 24;
+const int SET_W = 420;   // ширина окна настроек; высота — по содержимому (раскладка в id_settings.cpp)
+
+// Тема интерфейса: нейтрали Fluent (светлая/тёмная — по настройке приложений Windows),
+// акцент — системный. Геометрия и состояния элементов — по стайлгайду (см. id_ui.cpp).
+struct Theme {
+    bool dark = true;
+    COLORREF bg = 0, surface = 0, control = 0, controlHover = 0, border = 0, borderStrong = 0,
+             text = 0, muted = 0, accent = 0, accentInk = 0, accentSoft = 0, onAccent = 0,
+             danger = 0, warning = 0, success = 0;
+};
+#define WM_TRAY (WM_APP + 1)   // сообщения иконки в трее (окно-владелец — миникарта)
 
 // Текущее преобразование мир -> клиент миникарты
 struct MapXform { double s; LONG ox, oy; RECT bounds; };
@@ -222,6 +235,9 @@ struct AppState {
     // Читается из hook-потока мыши — поэтому atomic. Цена выбора: СКМ в приложениях
     // (орбита в Blender, автопрокрутка в браузере) достаётся холсту.
     std::atomic_bool mmbAnywhere = false;
+    // Развёрнутые окна двигаются с холстом (иначе — приклеены к монитору и панорама
+    // под ними визуально стоит). При выходе такие окна пересобираются на ближайшем мониторе.
+    bool moveMaximized = false;
     bool hudDrag = false;                  // зажата ЛКМ на миникарте (перетаскивание)
     int  syncCounter = 0;
     DWORD lastHudTick = 0, lastSyncTick = 0;  // троттлинг миникарты/синхронизации по времени
@@ -262,6 +278,15 @@ struct AppState {
     Microsoft::WRL::ComPtr<IDWriteFactory>        dwFactory;
     Microsoft::WRL::ComPtr<IWICImagingFactory>    wicFactory;
     Microsoft::WRL::ComPtr<IDWriteTextFormat>     ovTextFormat;
+    // ---- Интерфейс: тема, шрифты DirectWrite, окно настроек на Direct2D, трей ----
+    Theme theme;
+    Microsoft::WRL::ComPtr<IDWriteTextFormat> fmtTitle, fmtBody, fmtCtrl, fmtSmall, fmtSec;
+    Microsoft::WRL::ComPtr<ID2D1HwndRenderTarget> setRT;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>  setBrush;
+    int   setScroll = 0;                   // прокрутка окна настроек, px
+    HICON trayIcon = nullptr;              // рисуется кодом (в сборке нет ресурсов)
+    bool  trayAdded = false;
+    UINT  taskbarCreatedMsg = 0;           // «TaskbarCreated»: Explorer перезапустился — иконку добавить заново
     // Device-dependent (пересоздаются при потере устройства — D2DERR_RECREATE_TARGET):
     Microsoft::WRL::ComPtr<ID2D1HwndRenderTarget> ovRT;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>  ovShadowBrush, ovTextBrush;
@@ -342,7 +367,7 @@ void RenderOverview(AppState& app, HWND hwnd);
 LRESULT CALLBACK OvProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 DWORD WINAPI HookThreadProc(LPVOID param);
-void CenterOnCursorMonitor(AppState& app, double wx, double wy);
+void BringWindowIntoView(AppState& app, const TrackedWin& w);
 void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG, DWORD, DWORD);
 void DisableSnap(AppState& app);
 void RestoreSnap(AppState& app);
@@ -351,12 +376,11 @@ HWND FindDesktopIcons(AppState& app);
 void HideDesktopIcons(AppState& app);
 void RestoreDesktopIcons(AppState& app);
 void EnableDpiAwareness();
-void ApplyWin11Style(HWND hwnd);
+void ApplyWin11Style(AppState& app, HWND hwnd);
 std::wstring UiCfgPath();
 void SaveUiCfg(AppState& app);
 void LoadUiCfg(AppState& app);
 void PlaceHud(AppState& app);
-const wchar_t* CornerGlyph(AppState& app);
 void InitDefaultKeys(AppState& app);
 void RegisterAllHotkeys(AppState& app);
 void UnregisterAllHotkeys(AppState& app);
@@ -367,10 +391,30 @@ std::wstring KeyName(UINT vk);
 std::wstring KeyComboText(UINT mods, UINT vk);
 bool IsModifierVk(UINT vk);
 UINT CurrentMods();
-int SetFooterY();
 int FindConflict(AppState& app, UINT mods, UINT vk, int exceptId);
+bool ApplyCapture(AppState& app, UINT mods, UINT vk);
 LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 void OpenSettings(AppState& app);
+// id_ui.cpp — тема и примитивы Direct2D
+void LoadTheme(AppState& app);
+void InitUi(AppState& app);
+void OnThemeChanged(AppState& app);
+COLORREF UiMix(COLORREF a, COLORREF b, float t);
+D2D1_COLOR_F ToD2D(COLORREF c, float a);
+bool EnsureUiTarget(AppState& app, HWND hwnd, Microsoft::WRL::ComPtr<ID2D1HwndRenderTarget>& rt,
+                    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>& br);
+void UiFillRR(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* br, const D2D1_RECT_F& r, float rad, COLORREF c, float a);
+void UiStrokeRR(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* br, const D2D1_RECT_F& r, float rad, COLORREF c, float a, float w);
+void UiText(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* br, IDWriteTextFormat* f, const std::wstring& s,
+            const D2D1_RECT_F& r, COLORREF c, DWRITE_TEXT_ALIGNMENT al);
+void ResetMapGdi(AppState& app);
+// id_tray.cpp — иконка в трее и общие переключатели
+void AddTrayIcon(AppState& app);
+void RefreshTrayIcon(AppState& app);
+void RemoveTrayIcon(AppState& app);
+void OnTrayMessage(AppState& app, WPARAM wp, LPARAM lp);
+void ToggleMinimap(AppState& app);
+void TogglePreviews(AppState& app);
 void UpdateVirtualScreen(AppState& app);
 bool IsCloaked(HWND h);
 bool IsManageable(AppState& app, HWND h);

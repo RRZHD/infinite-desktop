@@ -196,7 +196,13 @@ void GotoMark(AppState& app, int i) {
 // При выходе: собрать окна на видимый рабочий стол (в рабочую область монитора).
 void GatherToDesktop(AppState& app) {
     for (auto& w : app.wins) {
-        if (!IsWindow(w.hwnd) || IsZoomed(w.hwnd)) continue;
+        if (!IsWindow(w.hwnd)) continue;
+        if (IsZoomed(w.hwnd)) {
+            // В режиме «развёрнутые двигаются с холстом» такое окно могло уехать за экран —
+            // пересобираем развёртывание на ближайшем мониторе. В обычном режиме не трогали.
+            if (app.moveMaximized) { ShowWindow(w.hwnd, SW_RESTORE); ShowWindow(w.hwnd, SW_MAXIMIZE); }
+            continue;
+        }
         RECT r;
         if (!GetWindowRect(w.hwnd, &r)) continue;
         MONITORINFO mi = { sizeof(mi) };

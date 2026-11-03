@@ -218,7 +218,7 @@ void RepositionAll(AppState& app) {
     moves.reserve(app.wins.size());
     for (auto& w : app.wins) {
         if (!IsWindow(w.hwnd)) continue;
-        if (IsZoomed(w.hwnd)) continue;          // развёрнутые приклеены к монитору
+        if (!app.moveMaximized && IsZoomed(w.hwnd)) continue;   // режим «приклеены к монитору»
         if (w.pinned) {                          // закреплённое окно не двигаем,
             RECT r;                              // а его мир тянем за фактической позицией
             if (GetWindowRect(w.hwnd, &r)) {
@@ -318,9 +318,7 @@ void FocusDir(AppState& app, int dx, int dy) {
     RECT s = { best->world.left - cx, best->world.top - cy, best->world.right - cx, best->world.bottom - cy };
     bool whole = s.left >= app.vsX && s.top >= app.vsY &&
                  s.right <= app.vsX + app.vsW && s.bottom <= app.vsY + app.vsH;
-    if (!whole)
-        CenterOnCursorMonitor(app, (best->world.left + best->world.right) / 2.0,
-                                   (best->world.top + best->world.bottom) / 2.0);
+    if (!whole) BringWindowIntoView(app, *best);
 }
 
 void PanBy(AppState& app, double dx, double dy) { app.targetX += dx; app.targetY += dy; }
