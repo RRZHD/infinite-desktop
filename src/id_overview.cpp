@@ -5,6 +5,8 @@
 
 using Microsoft::WRL::ComPtr;
 
+static HWND FindLiveWallpaperHost();   // определена ниже, рядом со снимком стола
+
 // ---------- Полноэкранный обзор (зум через DWM-превью) ----------
 // Прямые/обратные преобразования якоря зума (OvClientX/Y, OvWorldX/Y) — inline в id_common.h.
 
@@ -17,23 +19,54 @@ RECT VisWorld(const TrackedWin& w) {
 
 void ShowOverview(AppState& app) {
     if (app.overview) return;
-    // Актуальные обои на входе — но перекодируем файл (декод + ресемплинг, десятки мс)
-    // только если он реально сменился, иначе вход в зум каждый раз начинался бы с задержки.
-    if (WallpaperFileChanged(app)) LoadWallpaper(app);
+    // Живые обои (Wallpaper Engine и т.п.): фон обзора — не снимок, а живое DWM-превью
+    // окна-хоста, чтобы обои продолжали идти и в зуме. DWM-превью всегда рисуются поверх
+    // содержимого своего окна, поэтому в одном окне порядок «обои → тени → окна» не
+    // получить; слоёв два: подложка с превью хоста, над ней — окно обзора, прозрачное
+    // везде, кроме теней и превью окон (см. CreateOverviewBackdrop).
+    app.ovLiveBg = false;
+    HWND host = FindLiveWallpaperHost();
+    RECT hr;
+    if (host && app.ovBack && GetWindowRect(host, &hr) &&
+        SUCCEEDED(DwmRegisterThumbnail(app.ovBack, host, app.wallThumb.put()))) {
+        app.wallDst = { hr.left - app.vsX, hr.top - app.vsY, hr.right - app.vsX, hr.bottom - app.vsY };
+        app.ovLiveBg = true;
+    }
+    // Обычные обои — снимок/файл; перекодируем (десятки мс) только при реальной смене,
+    // иначе вход в зум каждый раз начинался бы с задержки. Живой фон не удался — берём
+    // снимок хоста; wallLive в условии — чтобы после закрытия программы обоев один раз
+    // вернуться к обычным.
+    if (!app.ovLiveBg && (host || app.wallLive || WallpaperFileChanged(app))) LoadWallpaper(app);
     app.lastWallCap = GetTickCount();
     app.ovLastZoom = -1;   // форсировать первую перерисовку
     RegisterAllOvThumbs(app);
     SetWindowPos(app.ov, HWND_TOPMOST, app.vsX, app.vsY, app.vsW, app.vsH, SWP_NOACTIVATE);
     ShowWindow(app.ov, SW_SHOWNA);
+    // Подложка — строго ПОД окном обзора и после него: появись она раньше, на кадр
+    // закрыла бы реальные окна обоями без превью.
+    if (app.ovLiveBg)
+        SetWindowPos(app.ovBack, app.ov, app.vsX, app.vsY, app.vsW, app.vsH, SWP_NOACTIVATE | SWP_SHOWWINDOW);
     app.overview = true;
 }
 
 void HideOverview(AppState& app) {
     if (!app.overview) return;
-    // Очистка превью обзора: сбрасываем в app.wins, ScopedThumbnail деструктор очистит.
-    for (auto& w : app.wins) w.thumbOv.reset();
+    // Сначала подложка (сквозь прозрачный обзор сразу видны настоящие стол и окна — в 1:1
+    // они совпадают с превью), потом обзор, и лишь затем снимаем превью: в обратном
+    // порядке на кадр мелькнули бы обои без окон.
+    if (app.ovBack) ShowWindow(app.ovBack, SW_HIDE);
     ShowWindow(app.ov, SW_HIDE);
+    for (auto& w : app.wins) w.thumbOv.reset();   // ScopedThumbnail снимает регистрацию
+    app.wallThumb.reset();
+    app.ovLiveBg = false;
     app.overview = false;
+}
+
+// Яркость обоев в обзоре: чем дальше отдалили, тем темнее (не темнее ~70%).
+static float OvWallOpacity(const AppState& app) {
+    double dim = (1.0 - app.zoom) / (1.0 - ZOOM_MIN);
+    if (dim < 0) dim = 0; if (dim > 1) dim = 1;
+    return (float)(1.0 - dim * 0.7);
 }
 
 // При выходе из обзора подобрать камеру так, чтобы реальные окна оказались там,
@@ -63,6 +96,17 @@ void UpdateOverview(AppState& app) {
         p.rcDestination = d;
         DwmUpdateThumbnailProperties(w.thumbOv, &p);
     }
+    // Живой фон: затемнение — непрозрачностью превью над чёрной подложкой.
+    if (app.ovLiveBg && app.wallThumb) {
+        DWM_THUMBNAIL_PROPERTIES p = {};
+        p.dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE |
+                    DWM_TNP_OPACITY | DWM_TNP_SOURCECLIENTAREAONLY;
+        p.rcDestination = app.wallDst;
+        p.opacity = (BYTE)(OvWallOpacity(app) * 255.0f + 0.5f);
+        p.fVisible = TRUE;
+        p.fSourceClientAreaOnly = FALSE;
+        DwmUpdateThumbnailProperties(app.wallThumb, &p);
+    }
     // Фон/тени НЕ через InvalidateRect: WM_PAINT пришёл бы на следующей итерации цикла,
     // и тени отставали бы от превью на кадр. FrameTick вызывает RenderOverview сразу
     // за этим обновлением — превью и тени попадают в одну композицию.
@@ -89,6 +133,38 @@ void InitGraphics(AppState& app) {
             15.0f, L"", app.ovTextFormat.GetAddressOf());
 }
 
+// Подложка живого фона и прозрачность окна обзора (вызывается после создания app.ov).
+// Подложка: чёрное окно под обзором, на которое кладётся живое DWM-превью хоста обоев.
+// Layered + transparent — чтобы мышь её не замечала (клик «внутрь окна» идёт сквозь неё).
+// Окно обзора получает попиксельную альфу: «размытие позади» с пустым регионом — на
+// Windows 8+ размытия нет, а альфа кадра Direct2D начинает учитываться композитором.
+static LRESULT CALLBACK BackProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (m == WM_NCHITTEST) return HTTRANSPARENT;
+    return DefWindowProcW(h, m, w, l);
+}
+void CreateOverviewBackdrop(AppState& app, HINSTANCE hi) {
+    WNDCLASSW c = {};
+    c.lpfnWndProc = BackProc;
+    c.hInstance = hi;
+    c.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    c.lpszClassName = L"InfiniteDesktopBackdrop";
+    RegisterClassW(&c);
+    app.ovBack = CreateWindowExW(
+        WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT,
+        c.lpszClassName, L"", WS_POPUP,
+        app.vsX, app.vsY, app.vsW, app.vsH, nullptr, nullptr, hi, nullptr);
+    if (app.ovBack) SetLayeredWindowAttributes(app.ovBack, 0, 255, LWA_ALPHA);
+    if (app.ov) {
+        HRGN rgn = CreateRectRgn(0, 0, -1, -1);
+        DWM_BLURBEHIND bb = {};
+        bb.dwFlags = DWM_BB_ENABLE | DWM_BB_BLURREGION;
+        bb.fEnable = TRUE;
+        bb.hRgnBlur = rgn;
+        DwmEnableBlurBehindWindow(app.ov, &bb);
+        DeleteObject(rgn);
+    }
+}
+
 // Всё device-dependent сбрасываем разом: после потери устройства (смена драйвера,
 // сон/пробуждение, переключение GPU) пересоздадим на следующем кадре.
 static void ReleaseOvTarget(AppState& app) {
@@ -108,7 +184,9 @@ static bool EnsureOvTarget(AppState& app, HWND hwnd) {
     // TYPE_DEFAULT — аппаратный рендер, программный fallback D2D выбирает сам.
     D2D1_RENDER_TARGET_PROPERTIES rp = D2D1::RenderTargetProperties(
         D2D1_RENDER_TARGET_TYPE_DEFAULT,
-        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), 96.0f, 96.0f);
+        // PREMULTIPLIED: с живым фоном окно прозрачно там, где ничего не нарисовано
+        // (см. CreateOverviewBackdrop); с обычным фоном кадр заливается непрозрачно.
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f, 96.0f);
     // PRESENT_OPTIONS_NONE: EndDraw ждёт vblank — кадр показывается целиком в одной
     // композиции DWM. С IMMEDIATELY часть экрана успевала обновиться, часть нет — на
     // обоях, меняющих яркость каждый кадр, это выглядело как дёрганье. Чтобы не ждать
@@ -116,6 +194,8 @@ static bool EnsureOvTarget(AppState& app, HWND hwnd) {
     D2D1_HWND_RENDER_TARGET_PROPERTIES hp = D2D1::HwndRenderTargetProperties(
         hwnd, D2D1::SizeU((UINT32)rc.right, (UINT32)rc.bottom), D2D1_PRESENT_OPTIONS_NONE);
     if (FAILED(app.d2dFactory->CreateHwndRenderTarget(rp, hp, app.ovRT.GetAddressOf()))) return false;
+    // ClearType на поверхности с альфой даёт цветную кайму поверх прозрачного — серое сглаживание.
+    app.ovRT->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
     app.ovRT->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 16.0f / 255.0f),   // ~16 альфы на слой тени
                                     app.ovShadowBrush.GetAddressOf());
     app.ovRT->CreateSolidColorBrush(D2D1::ColorF(150 / 255.0f, 160 / 255.0f, 175 / 255.0f),
@@ -165,6 +245,10 @@ static std::wstring WallpaperSource(AppState&) {
 }
 
 bool WallpaperFileChanged(AppState& app) {
+    // Живые обои: файл обоев Windows к картинке на столе отношения не имеет; снимок
+    // обновляется при входе в зум (ShowOverview), а не по этой периодической проверке —
+    // иначе фон обзора дёргался бы каждые 1.5 с.
+    if (app.wallLive && app.wallWic) return false;
     std::wstring src = WallpaperSource(app);
     if (src.empty()) return !app.wallPath.empty();   // обоев не стало — сбросить кэш
     return app.wallPath != src || app.wallMtime != FileMtime(src.c_str()) || !app.wallWic;
@@ -207,6 +291,34 @@ static BOOL CALLBACK CollectWorkerW(HWND h, LPARAM lp) {
 }
 
 static bool TryCaptureWindow(AppState& app, HWND hw);
+
+// ---------- Живые обои (Wallpaper Engine, Lively и т.п.) ----------
+// Такие программы не меняют файл обоев Windows: они встраивают СВОЁ окно внутрь окна
+// рабочего стола — в WorkerW за иконками (Windows 10, старые сборки 11) или прямо в
+// Progman (Windows 11 24H2+). Признак хоста, не зависящий от конкретной программы:
+// у окна рабочего стола есть видимое дочернее окно ЧУЖОГО процесса (свои дочерние —
+// иконки, служебный WorkerW — принадлежат explorer.exe).
+struct LiveCtx { DWORD hostPid; bool found; };
+static BOOL CALLBACK LiveChildProc(HWND c, LPARAM lp) {
+    LiveCtx* x = (LiveCtx*)lp;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(c, &pid);
+    if (pid != x->hostPid && IsWindowVisible(c)) { x->found = true; return FALSE; }
+    return TRUE;
+}
+static bool HostsForeignChild(HWND host) {
+    LiveCtx x = { 0, false };
+    GetWindowThreadProcessId(host, &x.hostPid);
+    EnumChildWindows(host, LiveChildProc, (LPARAM)&x);
+    return x.found;
+}
+static HWND FindLiveWallpaperHost() {
+    std::vector<HWND> ws;
+    EnumWindows(CollectWorkerW, (LPARAM)&ws);            // видимые WorkerW верхнего уровня
+    for (HWND h : ws) if (HostsForeignChild(h)) return h;
+    HWND pm = FindWindowW(L"Progman", nullptr);
+    return (pm && HostsForeignChild(pm)) ? pm : nullptr;
+}
 
 static bool CaptureDesktopWallpaper(AppState& app) {
     if (!app.wicFactory) return false;
@@ -276,6 +388,20 @@ static bool TryCaptureWindow(AppState& app, HWND hw) {
 void LoadWallpaper(AppState& app) {
     app.wallWic.Reset();
     app.wallD2D.Reset();
+
+    // Живые обои: фон обзора — снимок окна-хоста (то, что реально на столе), а не файл
+    // обоев Windows. Снимок не удался (чёрный/отказ) — идём обычным путём ниже.
+    HWND live = FindLiveWallpaperHost();
+    app.wallLive = (live != nullptr);
+    if (live && app.wicFactory) {
+        if (TryCaptureWindow(app, live)) {
+            app.wallIsScreen = true; app.wallPath = L"<live>";
+            UINT cw = 0, ch = 0; app.wallWic->GetSize(&cw, &ch);
+            WallLog(L"wallpaper: LIVE HOST %p capture %ux%u off=%d,%d", live, cw, ch, app.wallOffX, app.wallOffY);
+            return;
+        }
+        WallLog(L"wallpaper: LIVE HOST %p capture failed/black - fallback", live);
+    }
 
     std::wstring srcPath = WallpaperSource(app);
     if (srcPath.empty()) { app.wallPath.clear(); return; }
@@ -380,12 +506,11 @@ void RenderOverview(AppState& app, HWND hwnd) {
     if (want.width != have.width || want.height != have.height) rt->Resize(want);
 
     rt->BeginDraw();
-    rt->Clear(D2D1::ColorF(D2D1::ColorF::Black));
-    if (EnsureWallD2D(app)) {
+    // Живой фон: кадр прозрачен, обои показывает подложка под окном (и затемняет она же).
+    rt->Clear(app.ovLiveBg ? D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f) : D2D1::ColorF(D2D1::ColorF::Black));
+    if (!app.ovLiveBg && EnsureWallD2D(app)) {
         // Обои пользователя, затемнённые тем сильнее, чем дальше отдалили.
-        double dim = (1.0 - app.zoom) / (1.0 - ZOOM_MIN);
-        if (dim < 0) dim = 0; if (dim > 1) dim = 1;
-        float opacity = (float)(1.0 - dim * 0.7);   // не темнее ~70%
+        float opacity = OvWallOpacity(app);
         if (app.wallIsScreen) {
             // снимок реального рендера стола — 1:1, со смещением окна Progman
             D2D1_SIZE_U s = app.wallD2D->GetPixelSize();
@@ -483,18 +608,25 @@ static void ClickIntoWindow(AppState& app, HWND h, double cx, double cy, bool ri
     if (zoomed) SetCursorPos(cur.left + offX, cur.top + offY);
     else        SetWindowPos(h, HWND_TOP, app.vsX + (LONG)llround(cx) - offX,
                                           app.vsY + (LONG)llround(cy) - offY, 0, 0, F);
-    // Оверлей — прозрачен для hit-теста: WS_EX_TRANSPARENT (ядро пропускает такие окна)
-    // плюс ответ HTTRANSPARENT на WM_NCHITTEST (см. OvProc) — на всякий случай.
-    LONG_PTR ex = GetWindowLongPtrW(app.ov, GWL_EXSTYLE);
-    SetWindowLongPtrW(app.ov, GWL_EXSTYLE, ex | WS_EX_TRANSPARENT);
-    app.ovPassThrough = true;
+    // Пропустить клик сквозь окно обзора: «прокол» 3×3 px в регионе окна под курсором —
+    // в этой точке окна для системы просто нет, и ввод уходит ниже. WS_EX_TRANSPARENT
+    // для не-layered окна система сквозным не считает, а HTTRANSPARENT действует только
+    // в пределах одного потока — проверено пробой. Подложка под обзором прозрачна для
+    // мыши постоянно (layered + transparent), так что клик доходит до реального окна.
+    POINT tp = zoomed ? POINT{ cur.left + offX, cur.top + offY }
+                      : POINT{ app.vsX + (LONG)llround(cx), app.vsY + (LONG)llround(cy) };
+    int hx = tp.x - app.vsX, hy = tp.y - app.vsY;
+    HRGN rgn = CreateRectRgn(0, 0, app.vsW, app.vsH);
+    HRGN hole = CreateRectRgn(hx - 1, hy - 1, hx + 2, hy + 2);
+    CombineRgn(rgn, rgn, hole, RGN_DIFF);
+    DeleteObject(hole);
+    SetWindowRgn(app.ov, rgn, FALSE);          // регионом теперь владеет система
     INPUT in[2] = {};
     in[0].type = INPUT_MOUSE; in[0].mi.dwFlags = right ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_LEFTDOWN;
     in[1].type = INPUT_MOUSE; in[1].mi.dwFlags = right ? MOUSEEVENTF_RIGHTUP   : MOUSEEVENTF_LEFTUP;
     SendInput(2, in, sizeof(INPUT));
     PumpFor(30);   // маршрутизация инжектированного ввода асинхронна — даём ей пройти
-    app.ovPassThrough = false;
-    SetWindowLongPtrW(app.ov, GWL_EXSTYLE, ex);
+    SetWindowRgn(app.ov, nullptr, FALSE);      // вернуть целое окно
     if (zoomed) SetCursorPos(savedCur.x, savedCur.y);
     else        SetWindowPos(h, nullptr, cur.left, cur.top, 0, 0, F | SWP_NOZORDER);
 }
@@ -504,11 +636,6 @@ LRESULT CALLBACK OvProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_ERASEBKGND:
         return 1;
-    case WM_NCHITTEST:
-        // На время инжекции клика оверлей прозрачен для hit-теста: ввод идёт в реальное
-        // окно, подставленное под курсор (см. ClickIntoWindow).
-        if (app.ovPassThrough) return HTTRANSPARENT;
-        break;
     case WM_PAINT: {
         PAINTSTRUCT ps;
         BeginPaint(hwnd, &ps);        // валидирует область; рисуем не в DC, а Direct2D

@@ -25,7 +25,7 @@ set "MSVC=%VS%\VC\Tools\MSVC\%MSV%"
 
 set "SDKROOT=%ProgramFiles(x86)%\Windows Kits\10"
 set "SDKV="
-for /f "delims=" %%d in ('dir /b /ad /o-n "%SDKROOT%\Include" 2^>nul') do if not defined SDKV set "SDKV=%%d"
+for /f "delims=" %%d in ('dir /b /ad /o-n "%SDKROOT%\Include\10.*" 2^>nul') do if not defined SDKV set "SDKV=%%d"
 if not defined SDKV (
     echo [!] Windows 10 SDK not found
     exit /b 1

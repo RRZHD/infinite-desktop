@@ -158,6 +158,7 @@ static bool FrameTick(AppState& app, double dt) {
             SyncWorldFromScreen(app);
             AddNewWindows(app);
             if (RecheckParkedWindows(app)) RepositionAll(app);
+            RecheckDesktopIcons(app);   // иконки стола — заново после перезапуска Explorer
             if (app.hudVisible) RefreshHud(app);
         }
     }
@@ -202,6 +203,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         L"InfiniteDesktopOverview", L"", WS_POPUP,
         app.vsX, app.vsY, app.vsW, app.vsH,
         nullptr, nullptr, hInst, nullptr);
+    CreateOverviewBackdrop(app, hInst);   // подложка живых обоев + прозрачность окна обзора
 
     RegClass(hInst, L"InfiniteDesktopHUD", HudProc, IDC_HAND);
     app.hud = CreateWindowExW(
@@ -330,6 +332,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
     RemoveTrayIcon(app);
     if (app.settings) DestroyWindow(app.settings);
+    if (app.ovBack)  DestroyWindow(app.ovBack);
     if (app.ov)      DestroyWindow(app.ov);
     return 0;
 }

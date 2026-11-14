@@ -189,6 +189,12 @@ struct AppState {
 
     // Зум-обзор через DWM-превью (зум-аут всего рабочего стола колесом)
     HWND          ov = nullptr;            // полноэкранное окно обзора
+    // Живые обои в зуме: под окном обзора лежит подложка с живым DWM-превью окна-хоста
+    // обоев; само окно обзора при этом прозрачно там, где нет теней и превью окон.
+    HWND            ovBack = nullptr;      // подложка (прозрачна для мыши)
+    ScopedThumbnail wallThumb;             // живое превью хоста обоев на подложке
+    RECT            wallDst = {};          // куда превью ложится в клиенте подложки
+    bool            ovLiveBg = false;      // текущий сеанс обзора идёт с живым фоном
     bool          overview = false;        // активен ли обзор
     double        zoom = 1.0;              // текущий масштаб обзора (<=1)
     double        zoomTarget = 1.0;        // целевой масштаб
@@ -198,7 +204,6 @@ struct AppState {
     HWND          ovDragHwnd = nullptr;    // перетаскиваемое окно (или nullptr — фон)
     POINT         ovDragLast = {};
     bool          ovDragMoved = false;
-    bool          ovPassThrough = false;   // оверлей обзора прозрачен для hit-теста (пока инжектируем клик в окно)
     // ---- Direct2D: обзор рисуется на GPU ----
     // Device-independent (живут весь процесс):
     Microsoft::WRL::ComPtr<ID2D1Factory>          d2dFactory;
@@ -221,6 +226,7 @@ struct AppState {
     // Обои пользователя для фона обзора (затемняются по мере отдаления)
     Microsoft::WRL::ComPtr<IWICBitmap>            wallWic;       // декодированные обои в памяти (PBGRA)
     bool          wallIsScreen = false;    // wallWic — снимок реального рендера стола (1:1), а не файл
+    bool          wallLive = false;        // на столе живые обои (окно чужого процесса внутри WorkerW/Progman)
     int           wallOffX = 0, wallOffY = 0;   // смещение снимка относительно виртуального экрана
     std::wstring  wallPath;                // путь загруженных обоев (для отслеживания смены)
     ULONGLONG     wallMtime = 0;           // время изменения файла обоев (перечитываем только при смене)
@@ -295,6 +301,7 @@ void CommitZoomCam(AppState& app);
 void UpdateOverview(AppState& app);
 void RenderOverview(AppState& app, HWND hwnd);
 void InitGraphics(AppState& app);
+void CreateOverviewBackdrop(AppState& app, HINSTANCE hi);
 RECT VisWorld(const TrackedWin& w);
 LRESULT CALLBACK OvProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 // id_procs.cpp — HUD-окно, WinEvent, Snap, иконки стола, DPI
@@ -305,6 +312,7 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
 void DisableSnap(AppState& app);
 void RestoreSnap(AppState& app);
 void HideDesktopIcons(AppState& app);
+void RecheckDesktopIcons(AppState& app);
 void RestoreDesktopIcons(AppState& app);
 void EnableDpiAwareness();
 // id_settings.cpp — стиль Win11, размещение миникарты, горячие клавиши, окно настроек
@@ -343,6 +351,7 @@ void RegisterAllOvThumbs(AppState& app);
 void RebuildWindowList(AppState& app);
 void SyncWorldFromScreen(AppState& app);
 bool IsTracked(AppState& app, HWND h);
+bool IsTopLevelWindow(HWND h);
 void AddNewWindows(AppState& app);
 void RepositionAll(AppState& app);
 void PanBy(AppState& app, double dx, double dy);

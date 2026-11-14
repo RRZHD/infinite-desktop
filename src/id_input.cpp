@@ -4,13 +4,29 @@
 #include "id_common.h"
 
 // ---------- Зум колесом (вход в обзор) ----------
+static bool ClassIs(HWND h, const wchar_t* a, const wchar_t* b) {
+    wchar_t cls[64] = {};
+    GetClassNameW(h, cls, 64);
+    return !lstrcmpW(cls, a) || !lstrcmpW(cls, b);
+}
+
+// Под курсором — рабочий стол? Кроме окон самого стола считаем столом и любое окно,
+// корень которого — Progman/WorkerW: так устроены живые обои (Wallpaper Engine, Lively) —
+// их окно сидит внутри окна рабочего стола, и, раз иконки мы прячем, клик по «пустому
+// столу» попадает именно в него. Без этого панорама СКМ и зум колесом над столом
+// с живыми обоями не срабатывали бы.
 static bool IsDesktopClass(AppState& app, HWND h) {
     if (!h) return true;
     if (h == app.ov) return true;
-    wchar_t cls[64] = {};
-    GetClassNameW(h, cls, 64);
-    return !lstrcmpW(cls, L"WorkerW") || !lstrcmpW(cls, L"Progman") ||
-           !lstrcmpW(cls, L"SHELLDLL_DefView") || !lstrcmpW(cls, L"SysListView32");
+    if (ClassIs(h, L"WorkerW", L"Progman") || ClassIs(h, L"SHELLDLL_DefView", L"SysListView32")) return true;
+    HWND root = GetAncestor(h, GA_ROOT);
+    return root && root != h && ClassIs(root, L"WorkerW", L"Progman");
+}
+
+// Под курсором — панель задач (основная или на втором мониторе)?
+static bool IsTaskbar(HWND h) {
+    HWND root = h ? GetAncestor(h, GA_ROOT) : nullptr;
+    return root && ClassIs(root, L"Shell_TrayWnd", L"Shell_SecondaryTrayWnd");
 }
 
 // Меняет масштаб в `factor` раз с привязкой к точке pt (экранные координаты).
@@ -62,8 +78,11 @@ LRESULT CALLBACK MouseProc(int code, WPARAM wp, LPARAM lp) {
             // Панораму берём над пустым столом / в обзоре / по Ctrl+СКМ — либо везде,
             // если включён режим «СКМ в любом окне» (настройки). Иначе над окном
             // приложения (Blender, браузер) СКМ уходит в само приложение.
-            if (app.overview || ctrl || app.mmbAnywhere.load(std::memory_order_relaxed) ||
-                IsDesktopClass(app, WindowFromPoint(m->pt))) {
+            // Исключение для режима «в любом окне» — панель задач: средний клик по её
+            // кнопкам (новый экземпляр, закрытие, моды Windhawk) должен доходить до неё.
+            HWND under = WindowFromPoint(m->pt);
+            bool anywhere = app.mmbAnywhere.load(std::memory_order_relaxed) && !IsTaskbar(under);
+            if (app.overview || ctrl || anywhere || IsDesktopClass(app, under)) {
                 app.dragDeltaX.store(0, std::memory_order_relaxed);
                 app.dragDeltaY.store(0, std::memory_order_relaxed);
                 app.dragging.store(true, std::memory_order_release);

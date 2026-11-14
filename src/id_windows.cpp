@@ -11,6 +11,16 @@ void UpdateVirtualScreen(AppState& app) {
     app.vsH = GetSystemMetrics(SM_CYVIRTUALSCREEN);
 }
 
+// Окно всё ещё верхнего уровня? Программы живых обоев (Wallpaper Engine, Lively и т.п.)
+// создают обычное окно, а потом переносят его SetParent-ом внутрь окна рабочего стола
+// (WorkerW/Progman). Если мы успели взять такое окно в список, пока оно было верхнего
+// уровня, дальше двигать его нельзя: координаты SetWindowPos для дочернего окна — в
+// системе родителя, и панорама увозила бы сами обои со стола (а парковка — за край).
+// У окна верхнего уровня (в т.ч. с владельцем) родитель — окно рабочего стола.
+bool IsTopLevelWindow(HWND h) {
+    return GetAncestor(h, GA_PARENT) == GetDesktopWindow();
+}
+
 // ---------- Фильтр окон (эвристика Alt+Tab) ----------
 static bool IsCloaked(HWND h) {
     int cloaked = 0;
@@ -124,7 +134,7 @@ void SyncWorldFromScreen(AppState& app) {
     size_t write = 0;
     for (size_t i = 0; i < app.wins.size(); ++i) {
         HWND h = app.wins[i].hwnd;
-        if (!IsWindow(h) || !IsWindowVisible(h) || IsIconic(h)) {
+        if (!IsWindow(h) || !IsWindowVisible(h) || IsIconic(h) || !IsTopLevelWindow(h)) {
             // ScopedThumbnail автоматически unregister-нет превью при уничтожении
             continue;
         }
@@ -208,7 +218,7 @@ void RepositionAll(AppState& app) {
     std::vector<Move> moves;
     moves.reserve(app.wins.size());
     for (auto& w : app.wins) {
-        if (!IsWindow(w.hwnd)) continue;
+        if (!IsWindow(w.hwnd) || !IsTopLevelWindow(w.hwnd)) continue;   // стало дочерним — не наше
         if (!app.moveMaximized && IsZoomed(w.hwnd)) continue;   // режим «приклеены к монитору»
         if (w.pinned) {                          // закреплённое окно не двигаем,
             RECT r;                              // а его мир тянем за фактической позицией

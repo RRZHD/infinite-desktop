@@ -233,6 +233,18 @@ void HideDesktopIcons(AppState& app) {
     }
 }
 
+// Explorer перезапустился (сбой, обновление, перезапуск из-за модов оболочки) — окно
+// иконок пересоздано, прежний хэндл мёртв, а новые иконки снова видны. Прячем заново.
+// Вызывается из фоновой синхронизации; в обычной ситуации это один IsWindow.
+void RecheckDesktopIcons(AppState& app) {
+    if (app.iconsWin && IsWindow(app.iconsWin)) {
+        // окно то же, но иконки снова показаны (гонка при старте Explorer) — прячем
+        if (IsWindowVisible(app.iconsWin)) { app.iconsWereVisible = true; ShowWindow(app.iconsWin, SW_HIDE); }
+        return;
+    }
+    HideDesktopIcons(app);
+}
+
 void RestoreDesktopIcons(AppState& app) {
     if (app.iconsWin && app.iconsWereVisible && IsWindow(app.iconsWin))
         ShowWindow(app.iconsWin, SW_SHOW);

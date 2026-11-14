@@ -1,0 +1,4 @@
+# Batch files are always CRLF: cmd misparses an LF-only file that contains non-ASCII
+# characters (lines get split mid-way under code page 65001).
+*.bat text eol=crlf
+*.cmd text eol=crlf
