@@ -1,10 +1,10 @@
 // Ввод: зум колесом, hook СКМ/колеса/тачпада
-// Часть InfiniteDesktop. Компилируется как единый модуль через main.cpp.
+// Часть InfiniteDesktop.
 
 #include "id_common.h"
 
 // ---------- Зум колесом (вход в обзор) ----------
-bool IsDesktopClass(AppState& app, HWND h) {
+static bool IsDesktopClass(AppState& app, HWND h) {
     if (!h) return true;
     if (h == app.ov) return true;
     wchar_t cls[64] = {};
@@ -14,7 +14,7 @@ bool IsDesktopClass(AppState& app, HWND h) {
 }
 
 // Меняет масштаб в `factor` раз с привязкой к точке pt (экранные координаты).
-void DoZoomFactor(AppState& app, double factor, POINT pt) {
+static void DoZoomFactor(AppState& app, double factor, POINT pt) {
     double cx = pt.x - app.vsX;       // клиентские координаты окна обзора
     double cy = pt.y - app.vsY;
     if (!app.overview && app.zoom >= 0.999) {
@@ -25,8 +25,7 @@ void DoZoomFactor(AppState& app, double factor, POINT pt) {
         app.axWX = cx + app.vsX + (double)llround(app.camX);
         app.axWY = cy + app.vsY + (double)llround(app.camY);
     }
-    double wx = app.axWX + (cx - app.axCX) / app.zoom;   // мир под точкой
-    double wy = app.axWY + (cy - app.axCY) / app.zoom;
+    double wx = OvWorldX(app, cx), wy = OvWorldY(app, cy);   // мир под точкой
     app.zoomTarget *= factor;
     if (app.zoomTarget > 1.0)      app.zoomTarget = 1.0;
     if (app.zoomTarget < ZOOM_MIN) app.zoomTarget = ZOOM_MIN;
@@ -35,14 +34,14 @@ void DoZoomFactor(AppState& app, double factor, POINT pt) {
 }
 
 // Тик колеса: один шаг зума к/от курсора.
-void DoZoom(AppState& app, int delta, POINT pt) {
+static void DoZoom(AppState& app, int delta, POINT pt) {
     double ticks = (double)delta / (double)WHEEL_DELTA;
     DoZoomFactor(app, pow(ZOOM_STEP, ticks), pt);
 }
 
 // Панорама холста двухпальцевым скроллом (delta колеса/гориз.колеса).
 // Холст следует за пальцами; вертикаль и горизонталь — независимо.
-void PanWheel(AppState& app, double dxDelta, double dyDelta) {
+static void PanWheel(AppState& app, double dxDelta, double dyDelta) {
     if (app.overview) {
         app.axCX -= dxDelta * TP_WHEEL;
         app.axCY += dyDelta * TP_WHEEL;

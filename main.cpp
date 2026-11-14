@@ -23,8 +23,64 @@
 #include "src/id_common.h"   // типы, inline-глобалы, прототипы (модули — отдельные .cpp)
 
 // ---------- Кадр анимации и точка входа ----------
-// Возвращает true, если кадр обзора уже показан с ожиданием vblank (EndDraw) —
-// тогда цикл не должен ждать композицию ещё раз через DwmFlush.
+
+// Троттлинг обновления миникарты: ~60 Гц достаточно, чаще — только гонять DWM.
+static void RefreshHudThrottled(AppState& app) {
+    if (!app.hudVisible) return;
+    DWORD now = GetTickCount();
+    if (now - app.lastHudTick < 16) return;
+    app.lastHudTick = now;
+    RefreshHud(app);
+}
+
+// Кадр в открытом обзоре: проверка обоев, подхват новых окон, перерисовка только при
+// изменениях зума/панорамы/перетаскивания. Возвращает true, если кадр уже показан с
+// ожиданием vblank (EndDraw) — цикл тогда не должен ждать композицию ещё раз через DwmFlush.
+static bool OverviewFrame(AppState& app) {
+    // периодически проверяем обои (слайдшоу/смена в реальном времени), когда зум
+    // устаканился. Проверка — дешёвый stat файла; полная перекодировка (GDI+ decode
+    // + бикубический ресемплинг под все мониторы, десятки мс) — только при смене.
+    // Раньше перекодировка шла безусловно каждые 1.5 с — заметная заминка в обзоре.
+    if (fabs(app.zoomTarget - app.zoom) < 0.001 && GetTickCount() - app.lastWallCap >= 1500) {
+        app.lastWallCap = GetTickCount();
+        if (WallpaperFileChanged(app)) {
+            LoadWallpaper(app);
+            app.ovLastZoom = -1;          // форсировать перерисовку в этом же кадре
+        }
+    }
+    // Окна, открытые кликами из обзора (диалоги, новые окна), подхватываем и здесь —
+    // обычная фоновая синхронизация в обзоре не выполняется.
+    if (GetTickCount() - app.lastSyncTick >= 300) { app.lastSyncTick = GetTickCount(); AddNewWindows(app); }
+    // перерисовываем обзор только при изменениях (зум/панорама/перетаскивание)
+    bool ovChanged = (app.zoom != app.ovLastZoom || app.axCX != app.ovLastAxCX ||
+                      app.axCY != app.ovLastAxCY || app.axWX != app.ovLastAxWX ||
+                      app.axWY != app.ovLastAxWY || app.ovDragHwnd != nullptr);
+    if (ovChanged) {
+        app.ovLastZoom = app.zoom; app.ovLastAxCX = app.axCX; app.ovLastAxCY = app.axCY;
+        app.ovLastAxWX = app.axWX; app.ovLastAxWY = app.axWY;
+        UpdateOverview(app);            // превью (DWM) — на новые места
+        RenderOverview(app, app.ov);    // фон и тени — сразу, в тот же кадр; ждёт vblank
+        return true;
+    }
+    return false;
+}
+
+// Перепроверка припаркованных за кадром окон: приложение могло само сдвинуть окно
+// с места парковки (типично сразу после открытия). Сравниваем с точкой, куда его
+// поставили мы: припаркованное окно перекрывает край экрана на 1 px, поэтому
+// критерий «пересекает вьюпорт» здесь не годится — срабатывал бы всегда.
+static bool RecheckParkedWindows(AppState& app) {
+    bool repark = false;
+    for (auto& w : app.wins) {
+        if (!w.parkedOff || !IsWindow(w.hwnd)) continue;
+        RECT r;
+        if (GetWindowRect(w.hwnd, &r) && (r.left != w.parkedPos.x || r.top != w.parkedPos.y)) {
+            w.parkedOff = false; repark = true;
+        }
+    }
+    return repark;
+}
+
 static bool FrameTick(AppState& app, double dt) {
     bool dragging = app.dragging.load(std::memory_order_acquire);
     long dragDx = app.dragDeltaX.exchange(0, std::memory_order_acq_rel);
@@ -58,32 +114,7 @@ static bool FrameTick(AppState& app, double dt) {
             HideOverview(app);
             // дальше — обычная логика (окна уже расставлены)
         } else {
-            // периодически проверяем обои (слайдшоу/смена в реальном времени), когда зум
-            // устаканился. Проверка — дешёвый stat файла; полная перекодировка (GDI+ decode
-            // + бикубический ресемплинг под все мониторы, десятки мс) — только при смене.
-            // Раньше перекодировка шла безусловно каждые 1.5 с — заметная заминка в обзоре.
-            if (fabs(app.zoomTarget - app.zoom) < 0.001 && GetTickCount() - app.lastWallCap >= 1500) {
-                app.lastWallCap = GetTickCount();
-                if (WallpaperFileChanged(app)) {
-                    LoadWallpaper(app);
-                    app.ovLastZoom = -1;          // форсировать перерисовку в этом же кадре
-                }
-            }
-            // Окна, открытые кликами из обзора (диалоги, новые окна), подхватываем и здесь —
-            // обычная фоновая синхронизация в обзоре не выполняется.
-            if (GetTickCount() - app.lastSyncTick >= 300) { app.lastSyncTick = GetTickCount(); AddNewWindows(app); }
-            // перерисовываем обзор только при изменениях (зум/панорама/перетаскивание)
-            bool ovChanged = (app.zoom != app.ovLastZoom || app.axCX != app.ovLastAxCX ||
-                              app.axCY != app.ovLastAxCY || app.axWX != app.ovLastAxWX ||
-                              app.axWY != app.ovLastAxWY || app.ovDragHwnd != nullptr);
-            if (ovChanged) {
-                app.ovLastZoom = app.zoom; app.ovLastAxCX = app.axCX; app.ovLastAxCY = app.axCY;
-                app.ovLastAxWX = app.axWX; app.ovLastAxWY = app.axWY;
-                UpdateOverview(app);            // превью (DWM) — на новые места
-                RenderOverview(app, app.ov);    // фон и тени — сразу, в тот же кадр; ждёт vblank
-                return true;
-            }
-            return false;
+            return OverviewFrame(app);
         }
     }
 
@@ -111,13 +142,7 @@ static bool FrameTick(AppState& app, double dt) {
                 w.world = { r.left + cx, r.top + cy, r.right + cx, r.bottom + cy };
                 break;
             }
-            DWORD now = GetTickCount();
-            if (app.hudVisible && now - app.lastHudTick >= 16) {   // миникарта ~60 Гц достаточно
-                app.lastHudTick = now;
-                RECT rc; GetClientRect(app.hud, &rc);
-                ComputeXform(app, rc); UpdateThumbs(app, rc);
-                InvalidateRect(app.hud, nullptr, FALSE);
-            }
+            RefreshHudThrottled(app);
         }
     }
 
@@ -125,44 +150,29 @@ static bool FrameTick(AppState& app, double dt) {
     if (camChanged) {
         app.lastCamX = app.camX; app.lastCamY = app.camY;
         RepositionAll(app);        // реальные окна — каждый кадр (вплоть до частоты монитора)
-        DWORD now = GetTickCount();
-        if (app.hudVisible && now - app.lastHudTick >= 16) {   // миникарта ~60 Гц достаточно
-            app.lastHudTick = now;
-            RECT rc; GetClientRect(app.hud, &rc);
-            ComputeXform(app, rc); UpdateThumbs(app, rc);
-            InvalidateRect(app.hud, nullptr, FALSE);
-        }
+        RefreshHudThrottled(app);
     } else if (!dragging) {
         DWORD now = GetTickCount();
         if (now - app.lastSyncTick >= 300) {                 // периодическая синхронизация
             app.lastSyncTick = now;
             SyncWorldFromScreen(app);
             AddNewWindows(app);
-            // Перепроверка припаркованных за кадром окон: приложение могло само сдвинуть
-            // окно с места парковки (типично сразу после открытия). Сравниваем с точкой,
-            // куда его поставили мы: припаркованное окно перекрывает край экрана на 1 px,
-            // поэтому критерий «пересекает вьюпорт» здесь не годится — срабатывал бы всегда.
-            // Сдвинуто — снимаем парковку, и RepositionAll вернёт его к краю.
-            {
-                bool repark = false;
-                for (auto& w : app.wins) {
-                    if (!w.parkedOff || !IsWindow(w.hwnd)) continue;
-                    RECT r;
-                    if (GetWindowRect(w.hwnd, &r) &&
-                        (r.left != w.parkedPos.x || r.top != w.parkedPos.y)) {
-                        w.parkedOff = false; repark = true;
-                    }
-                }
-                if (repark) RepositionAll(app);
-            }
-            if (app.hudVisible) {
-                RECT rc; GetClientRect(app.hud, &rc);
-                ComputeXform(app, rc); UpdateThumbs(app, rc);
-                InvalidateRect(app.hud, nullptr, FALSE);
-            }
+            if (RecheckParkedWindows(app)) RepositionAll(app);
+            if (app.hudVisible) RefreshHud(app);
         }
     }
     return false;
+}
+
+// Регистрация класса окна приложения (окна отличаются только процедурой, именем и
+// курсором) — общий код для обзора, миникарты и настроек.
+static void RegClass(HINSTANCE hi, const wchar_t* name, WNDPROC proc, LPCWSTR cursorId) {
+    WNDCLASSW c = {};
+    c.lpfnWndProc = proc;
+    c.hInstance = hi;
+    c.hCursor = LoadCursorW(nullptr, cursorId);
+    c.lpszClassName = name;
+    RegisterClassW(&c);
 }
 
 // ---------- main ----------
@@ -186,28 +196,17 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     LoadWallpaper(app);   // обои пользователя для фона обзора
 
     // Класс и окно полноэкранного обзора (зум), пока скрыто
-    WNDCLASSW oc = {};
-    oc.lpfnWndProc = OvProc;
-    oc.hInstance = hInst;
-    oc.hCursor = LoadCursor(nullptr, IDC_HAND);
-    oc.lpszClassName = L"InfiniteDesktopOverview";
-    RegisterClassW(&oc);
+    RegClass(hInst, L"InfiniteDesktopOverview", OvProc, IDC_HAND);
     app.ov = CreateWindowExW(
         WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
-        oc.lpszClassName, L"", WS_POPUP,
+        L"InfiniteDesktopOverview", L"", WS_POPUP,
         app.vsX, app.vsY, app.vsW, app.vsH,
         nullptr, nullptr, hInst, nullptr);
 
-    WNDCLASSW wc = {};
-    wc.lpfnWndProc = HudProc;
-    wc.hInstance = hInst;
-    wc.hCursor = LoadCursor(nullptr, IDC_HAND);
-    wc.lpszClassName = L"InfiniteDesktopHUD";
-    RegisterClassW(&wc);
-
+    RegClass(hInst, L"InfiniteDesktopHUD", HudProc, IDC_HAND);
     app.hud = CreateWindowExW(
         WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED,
-        wc.lpszClassName, L"InfiniteDesktop",
+        L"InfiniteDesktopHUD", L"InfiniteDesktop",
         WS_POPUP | WS_VISIBLE,
         0, 0, MAP_W, MAP_H,
         nullptr, nullptr, hInst, nullptr);
@@ -220,16 +219,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     AddTrayIcon(app);
 
     // Окно настроек горячих клавиш (скрыто; открывается по шестерёнке)
-    WNDCLASSW stc = {};
-    stc.lpfnWndProc = SettingsProc;
-    stc.hInstance = hInst;
-    stc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    stc.lpszClassName = L"InfiniteDesktopSettings";
-    RegisterClassW(&stc);
+    RegClass(hInst, L"InfiniteDesktopSettings", SettingsProc, IDC_ARROW);
     // Непрозрачное: рисуется Direct2D (сглаженные скругления, кольцо фокуса).
     app.settings = CreateWindowExW(
         WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-        stc.lpszClassName, L"Настройки",
+        L"InfiniteDesktopSettings", L"Настройки",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
         120, 120, SET_W, 480, nullptr, nullptr, hInst, nullptr);
     ApplyWin11Style(app, app.settings);
@@ -243,11 +237,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     LoadMarks(app);           // закладки камеры (если есть)
     ArrangeOnStartup(app);    // вернуть сохранённые / разложить новые без наложения
     RepositionAll(app);       // применить расстановку
-    {
-        RECT rc; GetClientRect(app.hud, &rc);
-        ComputeXform(app, rc);
-        UpdateThumbs(app, rc);
-    }
+    RefreshHud(app);          // миникарта: пересчёт отображения и превью до первого кадра
     // Глобальный hook СКМ/колеса — на отдельном потоке (устойчив к подвисаниям)
     app.hookThread.reset(CreateThread(nullptr, 0, HookThreadProc, hInst, 0, &app.hookThreadId));
 

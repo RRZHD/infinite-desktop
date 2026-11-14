@@ -1,11 +1,11 @@
 // Миникарта: преобразование мир<->карта, отрисовка, шестерёнка
-// Часть InfiniteDesktop. Компилируется как единый модуль через main.cpp.
+// Часть InfiniteDesktop.
 
 #include "id_common.h"
 
 // ---------- Преобразование мир <-> миникарта ----------
 // Границы мира берём по окнам (стабильны при панораме) + поле.
-void ComputeWorldBounds(AppState& app, RECT& out) {
+static void ComputeWorldBounds(AppState& app, RECT& out) {
     if (app.wins.empty()) {
         LONG cx = (LONG)llround(app.camX), cy = (LONG)llround(app.camY);
         out.left = app.vsX + cx; out.top = app.vsY + cy;
@@ -42,7 +42,7 @@ void ComputeXform(AppState& app, const RECT& client) {
     app.xform.bounds = b;
 }
 
-RECT WorldToClient(AppState& app, const RECT& w) {
+static RECT WorldToClient(AppState& app, const RECT& w) {
     RECT r;
     r.left   = app.xform.ox + (LONG)((w.left   - app.xform.bounds.left) * app.xform.s);
     r.top    = app.xform.oy + (LONG)((w.top    - app.xform.bounds.top)  * app.xform.s);
@@ -76,7 +76,16 @@ void UpdateThumbs(AppState& app, const RECT& client) {
     }
 }
 
-HFONT UiFont();   // системный шрифт Win11 (определён ниже)
+// Обновить миникарту под текущую камеру: пересчёт отображения, живые превью,
+// запрос WM_PAINT. app.hudVisible проверяет вызывающий (часть путей обновляет
+// карту и в фоне, без троттлинга).
+void RefreshHud(AppState& app) {
+    if (!app.hud) return;
+    RECT rc; GetClientRect(app.hud, &rc);
+    ComputeXform(app, rc);
+    UpdateThumbs(app, rc);
+    InvalidateRect(app.hud, nullptr, FALSE);
+}
 
 // Кнопка-шестерёнка в правом-верхнем углу миникарты
 RECT GearRect(const RECT& client) {

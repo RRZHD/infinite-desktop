@@ -1,18 +1,30 @@
-// Сохранение/восстановление раскладки окон
-// Часть InfiniteDesktop. Компилируется как единый модуль через main.cpp.
+// Сохранение/восстановление раскладки окон, закладки камеры, каталог конфига
+// Часть InfiniteDesktop.
 
 #include "id_common.h"
 
+// ---------- Каталог сохраняемых файлов ----------
+// Всё состояние приложения живёт в %LOCALAPPDATA%\InfiniteDesktop; каталог
+// создаётся при первом обращении. Единая точка для layout/marks/hotkeys/ui/wall.log.
+std::wstring ConfigPath(const wchar_t* file) {
+    wchar_t buf[MAX_PATH] = {};
+    DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH);
+    std::wstring dir = (n && n < MAX_PATH) ? std::wstring(buf) : L".";
+    dir += L"\\InfiniteDesktop";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    return dir + L"\\" + file;
+}
+
 // ---------- Сохранение/восстановление раскладки окон ----------
 
-std::string WToUtf8(const std::wstring& w) {
+static std::string WToUtf8(const std::wstring& w) {
     if (w.empty()) return {};
     int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
     std::string s(n, 0);
     WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &s[0], n, nullptr, nullptr);
     return s;
 }
-std::wstring Utf8ToW(const std::string& s) {
+static std::wstring Utf8ToW(const std::string& s) {
     if (s.empty()) return {};
     int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
     std::wstring w(n, 0);
@@ -20,7 +32,7 @@ std::wstring Utf8ToW(const std::string& s) {
     return w;
 }
 
-void WinKey(HWND h, std::wstring& cls, std::wstring& title) {
+static void WinKey(HWND h, std::wstring& cls, std::wstring& title) {
     wchar_t c[128] = {};
     GetClassNameW(h, c, 128);
     cls = c;
@@ -31,18 +43,9 @@ void WinKey(HWND h, std::wstring& cls, std::wstring& title) {
     title = t;
 }
 
-std::wstring LayoutPath() {
-    wchar_t buf[MAX_PATH] = {};
-    DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH);
-    std::wstring dir = (n && n < MAX_PATH) ? std::wstring(buf) : L".";
-    dir += L"\\InfiniteDesktop";
-    CreateDirectoryW(dir.c_str(), nullptr);
-    return dir + L"\\layout.txt";
-}
-
 // Сохранить мировые позиции всех окон (формат: L<TAB>T<TAB>R<TAB>B<TAB>class<TAB>title).
 void SaveLayout(AppState& app) {
-    std::ofstream f(LayoutPath().c_str(), std::ios::binary | std::ios::trunc);
+    std::ofstream f(ConfigPath(L"layout.txt").c_str(), std::ios::binary | std::ios::trunc);
     if (!f) return;
     for (auto& w : app.wins) {
         if (!IsWindow(w.hwnd)) continue;
@@ -57,7 +60,7 @@ void SaveLayout(AppState& app) {
 
 void LoadLayout(AppState& app) {
     app.saved.clear();
-    std::ifstream f(LayoutPath().c_str(), std::ios::binary);
+    std::ifstream f(ConfigPath(L"layout.txt").c_str(), std::ios::binary);
     if (!f) return;
     std::string line;
     while (std::getline(f, line)) {
@@ -83,7 +86,7 @@ void LoadLayout(AppState& app) {
 }
 
 // Разложить окна «полками» без наложения. Старт — ниже уже размещённых окон.
-void SpreadWindows(AppState& app, const std::vector<int>& idx) {
+static void SpreadWindows(AppState& app, const std::vector<int>& idx) {
     if (idx.empty()) return;
     std::vector<bool> spread(app.wins.size(), false);
     for (int i : idx) spread[i] = true;
@@ -146,17 +149,8 @@ void ArrangeOnStartup(AppState& app) {
 // ---------- Закладки камеры («рабочие места» на бесконечном холсте) ----------
 // Бесконечный стол делит на «рабочие места» сама камера: закладка — это точка
 // холста, куда можно вернуться одним хоткеем. Хранятся рядом с раскладкой.
-std::wstring MarksPath() {
-    wchar_t buf[MAX_PATH] = {};
-    DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH);
-    std::wstring dir = (n && n < MAX_PATH) ? std::wstring(buf) : L".";
-    dir += L"\\InfiniteDesktop";
-    CreateDirectoryW(dir.c_str(), nullptr);
-    return dir + L"\\marks.txt";
-}
-
-void SaveMarks(AppState& app) {
-    std::ofstream f(MarksPath().c_str(), std::ios::binary | std::ios::trunc);
+static void SaveMarks(AppState& app) {
+    std::ofstream f(ConfigPath(L"marks.txt").c_str(), std::ios::binary | std::ios::trunc);
     if (!f) return;
     for (int i = 0; i < MARK_COUNT; ++i) {
         if (!app.marks[i].set) continue;
@@ -167,7 +161,7 @@ void SaveMarks(AppState& app) {
 }
 
 void LoadMarks(AppState& app) {
-    std::ifstream f(MarksPath().c_str(), std::ios::binary);
+    std::ifstream f(ConfigPath(L"marks.txt").c_str(), std::ios::binary);
     if (!f) return;
     std::string line;
     while (std::getline(f, line)) {
@@ -217,8 +211,3 @@ void GatherToDesktop(AppState& app) {
                      SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
 }
-
-// Один кадр анимации/панорамы. dt — реальное время кадра (сглаживание не зависит
-// от частоты кадров). Вызывается из высокочастотного цикла, а не по WM_TIMER.
-
-

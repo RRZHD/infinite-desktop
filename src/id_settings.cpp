@@ -16,20 +16,14 @@ HFONT UiFont() {
 // Заголовок в цвет темы (тёмный/светлый) и скруглённые углы (Windows 11)
 void ApplyWin11Style(AppState& app, HWND hwnd) {
     BOOL dark = app.theme.dark ? TRUE : FALSE;
-    DwmSetWindowAttribute(hwnd, 20 /*USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof(dark));
-    int round = 2 /*DWMWCP_ROUND*/;
-    DwmSetWindowAttribute(hwnd, 33 /*WINDOW_CORNER_PREFERENCE*/, &round, sizeof(round));
+    DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+    int round = DWMWCP_ROUND;
+    DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &round, sizeof(round));
 }
 
-std::wstring UiCfgPath() {
-    wchar_t buf[MAX_PATH] = {};
-    DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH);
-    std::wstring dir = (n && n < MAX_PATH) ? std::wstring(buf) : L".";
-    dir += L"\\InfiniteDesktop";
-    CreateDirectoryW(dir.c_str(), nullptr);
-    return dir + L"\\ui.txt";
-}
-void SaveUiCfg(AppState& app) {
+static std::wstring UiCfgPath() { return ConfigPath(L"ui.txt"); }
+
+static void SaveUiCfg(AppState& app) {
     std::ofstream f(UiCfgPath().c_str(), std::ios::binary | std::ios::trunc);
     if (f) {
         std::string s = "corner "  + std::to_string(app.corner) + "\n"
@@ -96,15 +90,9 @@ void UnregisterAllHotkeys(AppState& app) {
     for (int id = HK_LEFT; id <= HK_LAST; ++id) UnregisterHotKey(app.hud, id);
 }
 
-std::wstring HotkeysPath() {
-    wchar_t buf[MAX_PATH] = {};
-    DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH);
-    std::wstring dir = (n && n < MAX_PATH) ? std::wstring(buf) : L".";
-    dir += L"\\InfiniteDesktop";
-    CreateDirectoryW(dir.c_str(), nullptr);
-    return dir + L"\\hotkeys.txt";
-}
-void SaveHotkeys(AppState& app) {
+static std::wstring HotkeysPath() { return ConfigPath(L"hotkeys.txt"); }
+
+static void SaveHotkeys(AppState& app) {
     std::ofstream f(HotkeysPath().c_str(), std::ios::binary | std::ios::trunc);
     if (!f) return;
     f.write("v2\n", 3);   // версия формата (v2: 9 мест); далее строки «id mods vk»
@@ -150,7 +138,7 @@ void LoadHotkeys(AppState& app) {
     }
 }
 
-std::wstring KeyName(UINT vk) {
+static std::wstring KeyName(UINT vk) {
     switch (vk) {
         case VK_LEFT:  return L"←"; case VK_RIGHT: return L"→";
         case VK_UP:    return L"↑"; case VK_DOWN:  return L"↓";
@@ -168,7 +156,7 @@ std::wstring KeyName(UINT vk) {
     if (sc && GetKeyNameTextW(lp, buf, 64) > 0) return buf;
     wchar_t b[16]; wsprintfW(b, L"VK_%02X", vk); return b;
 }
-std::wstring KeyComboText(UINT mods, UINT vk) {
+static std::wstring KeyComboText(UINT mods, UINT vk) {
     std::wstring s;
     if (mods & MOD_CONTROL) s += L"Ctrl+";
     if (mods & MOD_ALT)     s += L"Alt+";
@@ -178,13 +166,13 @@ std::wstring KeyComboText(UINT mods, UINT vk) {
     return s;
 }
 
-bool IsModifierVk(UINT vk) {
+static bool IsModifierVk(UINT vk) {
     return vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU ||
            vk == VK_LWIN || vk == VK_RWIN ||
            vk == VK_LSHIFT || vk == VK_RSHIFT || vk == VK_LCONTROL ||
            vk == VK_RCONTROL || vk == VK_LMENU || vk == VK_RMENU || vk == VK_CAPITAL;
 }
-UINT CurrentMods() {
+static UINT CurrentMods() {
     UINT m = 0;
     if (GetKeyState(VK_CONTROL) & 0x8000) m |= MOD_CONTROL;
     if (GetKeyState(VK_MENU)    & 0x8000) m |= MOD_ALT;
@@ -223,7 +211,7 @@ static int DigitIndex(UINT vk, UINT& base) {
 }
 
 // Найти другое действие с тем же сочетанием (или -1).
-int FindConflict(AppState& app, UINT mods, UINT vk, int exceptId) {
+static int FindConflict(AppState& app, UINT mods, UINT vk, int exceptId) {
     for (int id = HK_LEFT; id <= HK_LAST; ++id)
         if (id != exceptId && app.keys[id].mods == mods && app.keys[id].vk == vk) return id;
     return -1;

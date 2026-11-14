@@ -1,5 +1,5 @@
-// Общее: типы, состояние, константы, includes
-// Часть InfiniteDesktop. Компилируется как единый модуль через main.cpp.
+// Общее: типы, состояние, константы, межмодульные прототипы.
+// Часть InfiniteDesktop.
 
 #pragma once
 
@@ -40,121 +40,49 @@
 #define SPI_SETWINARRANGING 0x0083
 #endif
 
+// Атрибуты DWM для стиля Win11 (заголовок в цвет темы, скруглённые углы).
+// Значения фиксированы системой; имена есть не во всех SDK — защищаем #ifndef.
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
+#endif
+#ifndef DWMWA_WINDOW_CORNER_PREFERENCE
+#define DWMWA_WINDOW_CORNER_PREFERENCE 33
+#endif
+#ifndef DWMWCP_ROUND
+#define DWMWCP_ROUND 2
+#endif
+
 // ---------- RAII-обёртки для GDI/WinAPI ресурсов ----------
-// Устраняют утечки при раннем выходе, исключениях, и ошибках создания.
+// Устраняют утечки при раннем выходе, исключениях и ошибках создания.
+// Один шаблон вместо восьми почти одинаковых классов:Close-функцию передаём
+// параметром шаблона (C++17 `auto` NTTP), семантика — прежняя один в один.
 
-struct ScopedDC {
-    HDC h = nullptr;
-    explicit ScopedDC(HDC h = nullptr) : h(h) {}
-    ~ScopedDC() { if (h) DeleteDC(h); }
-    ScopedDC(const ScopedDC&) = delete;
-    ScopedDC& operator=(const ScopedDC&) = delete;
-    ScopedDC(ScopedDC&& o) noexcept : h(o.h) { o.h = nullptr; }
-    ScopedDC& operator=(ScopedDC&& o) noexcept { if (this != &o) { if (h) DeleteDC(h); h = o.h; o.h = nullptr; } return *this; }
-    operator HDC() const { return h; }
-    HDC* put() { reset(); return &h; }
-    void reset(HDC nh = nullptr) { if (h) DeleteDC(h); h = nh; }
-    HDC release() { HDC r = h; h = nullptr; return r; }
+template <typename H, auto Close>
+struct ScopedRes {
+    H h = nullptr;
+    explicit ScopedRes(H hh = nullptr) : h(hh) {}
+    ~ScopedRes() { if (h) Close(h); }
+    ScopedRes(const ScopedRes&) = delete;
+    ScopedRes& operator=(const ScopedRes&) = delete;
+    ScopedRes(ScopedRes&& o) noexcept : h(o.h) { o.h = nullptr; }
+    ScopedRes& operator=(ScopedRes&& o) noexcept {
+        if (this != &o) { if (h) Close(h); h = o.h; o.h = nullptr; }
+        return *this;
+    }
+    operator H() const { return h; }
+    H* put() { reset(); return &h; }
+    void reset(H nh = nullptr) { if (h) Close(h); h = nh; }
+    H release() { H r = h; h = nullptr; return r; }
 };
 
-struct ScopedBitmap {
-    HBITMAP h = nullptr;
-    explicit ScopedBitmap(HBITMAP h = nullptr) : h(h) {}
-    ~ScopedBitmap() { if (h) DeleteObject(h); }
-    ScopedBitmap(const ScopedBitmap&) = delete;
-    ScopedBitmap& operator=(const ScopedBitmap&) = delete;
-    ScopedBitmap(ScopedBitmap&& o) noexcept : h(o.h) { o.h = nullptr; }
-    ScopedBitmap& operator=(ScopedBitmap&& o) noexcept { if (this != &o) { if (h) DeleteObject(h); h = o.h; o.h = nullptr; } return *this; }
-    operator HBITMAP() const { return h; }
-    HBITMAP* put() { reset(); return &h; }
-    void reset(HBITMAP nh = nullptr) { if (h) DeleteObject(h); h = nh; }
-    HBITMAP release() { HBITMAP r = h; h = nullptr; return r; }
-};
-
-struct ScopedPen {
-    HPEN h = nullptr;
-    explicit ScopedPen(HPEN h = nullptr) : h(h) {}
-    ~ScopedPen() { if (h) DeleteObject(h); }
-    ScopedPen(const ScopedPen&) = delete;
-    ScopedPen& operator=(const ScopedPen&) = delete;
-    ScopedPen(ScopedPen&& o) noexcept : h(o.h) { o.h = nullptr; }
-    ScopedPen& operator=(ScopedPen&& o) noexcept { if (this != &o) { if (h) DeleteObject(h); h = o.h; o.h = nullptr; } return *this; }
-    operator HPEN() const { return h; }
-    HPEN* put() { reset(); return &h; }
-    void reset(HPEN nh = nullptr) { if (h) DeleteObject(h); h = nh; }
-    HPEN release() { HPEN r = h; h = nullptr; return r; }
-};
-
-struct ScopedBrush {
-    HBRUSH h = nullptr;
-    explicit ScopedBrush(HBRUSH h = nullptr) : h(h) {}
-    ~ScopedBrush() { if (h) DeleteObject(h); }
-    ScopedBrush(const ScopedBrush&) = delete;
-    ScopedBrush& operator=(const ScopedBrush&) = delete;
-    ScopedBrush(ScopedBrush&& o) noexcept : h(o.h) { o.h = nullptr; }
-    ScopedBrush& operator=(ScopedBrush&& o) noexcept { if (this != &o) { if (h) DeleteObject(h); h = o.h; o.h = nullptr; } return *this; }
-    operator HBRUSH() const { return h; }
-    HBRUSH* put() { reset(); return &h; }
-    void reset(HBRUSH nh = nullptr) { if (h) DeleteObject(h); h = nh; }
-    HBRUSH release() { HBRUSH r = h; h = nullptr; return r; }
-};
-
-struct ScopedFont {
-    HFONT h = nullptr;
-    explicit ScopedFont(HFONT h = nullptr) : h(h) {}
-    ~ScopedFont() { if (h) DeleteObject(h); }
-    ScopedFont(const ScopedFont&) = delete;
-    ScopedFont& operator=(const ScopedFont&) = delete;
-    ScopedFont(ScopedFont&& o) noexcept : h(o.h) { o.h = nullptr; }
-    ScopedFont& operator=(ScopedFont&& o) noexcept { if (this != &o) { if (h) DeleteObject(h); h = o.h; o.h = nullptr; } return *this; }
-    operator HFONT() const { return h; }
-    HFONT* put() { reset(); return &h; }
-    void reset(HFONT nh = nullptr) { if (h) DeleteObject(h); h = nh; }
-    HFONT release() { HFONT r = h; h = nullptr; return r; }
-};
-
-struct ScopedRgn {
-    HRGN h = nullptr;
-    explicit ScopedRgn(HRGN h = nullptr) : h(h) {}
-    ~ScopedRgn() { if (h) DeleteObject(h); }
-    ScopedRgn(const ScopedRgn&) = delete;
-    ScopedRgn& operator=(const ScopedRgn&) = delete;
-    ScopedRgn(ScopedRgn&& o) noexcept : h(o.h) { o.h = nullptr; }
-    ScopedRgn& operator=(ScopedRgn&& o) noexcept { if (this != &o) { if (h) DeleteObject(h); h = o.h; o.h = nullptr; } return *this; }
-    operator HRGN() const { return h; }
-    HRGN* put() { reset(); return &h; }
-    void reset(HRGN nh = nullptr) { if (h) DeleteObject(h); h = nh; }
-    HRGN release() { HRGN r = h; h = nullptr; return r; }
-};
-
-struct ScopedHandle {
-    HANDLE h = nullptr;
-    explicit ScopedHandle(HANDLE h = nullptr) : h(h) {}
-    ~ScopedHandle() { if (h) CloseHandle(h); }
-    ScopedHandle(const ScopedHandle&) = delete;
-    ScopedHandle& operator=(const ScopedHandle&) = delete;
-    ScopedHandle(ScopedHandle&& o) noexcept : h(o.h) { o.h = nullptr; }
-    ScopedHandle& operator=(ScopedHandle&& o) noexcept { if (this != &o) { if (h) CloseHandle(h); h = o.h; o.h = nullptr; } return *this; }
-    operator HANDLE() const { return h; }
-    HANDLE* put() { reset(); return &h; }
-    void reset(HANDLE nh = nullptr) { if (h) CloseHandle(h); h = nh; }
-    HANDLE release() { HANDLE r = h; h = nullptr; return r; }
-};
-
-// RAII для DWM-превью: привязывает owner-окно для корректной очистки.
-struct ScopedThumbnail {
-    HTHUMBNAIL h = nullptr;
-    explicit ScopedThumbnail(HTHUMBNAIL h = nullptr) : h(h) {}
-    ~ScopedThumbnail() { if (h) DwmUnregisterThumbnail(h); }
-    ScopedThumbnail(const ScopedThumbnail&) = delete;
-    ScopedThumbnail& operator=(const ScopedThumbnail&) = delete;
-    ScopedThumbnail(ScopedThumbnail&& o) noexcept : h(o.h) { o.h = nullptr; }
-    ScopedThumbnail& operator=(ScopedThumbnail&& o) noexcept { if (this != &o) { if (h) DwmUnregisterThumbnail(h); h = o.h; o.h = nullptr; } return *this; }
-    operator HTHUMBNAIL() const { return h; }
-    HTHUMBNAIL* put() { reset(); return &h; }
-    void reset(HTHUMBNAIL nh = nullptr) { if (h) DwmUnregisterThumbnail(h); h = nh; }
-    HTHUMBNAIL release() { HTHUMBNAIL r = h; h = nullptr; return r; }
-};
+using ScopedDC        = ScopedRes<HDC,        DeleteDC>;
+using ScopedBitmap    = ScopedRes<HBITMAP,    DeleteObject>;
+using ScopedPen       = ScopedRes<HPEN,       DeleteObject>;
+using ScopedBrush     = ScopedRes<HBRUSH,     DeleteObject>;
+using ScopedFont      = ScopedRes<HFONT,      DeleteObject>;
+using ScopedRgn       = ScopedRes<HRGN,       DeleteObject>;
+using ScopedHandle    = ScopedRes<HANDLE,     CloseHandle>;
+using ScopedThumbnail = ScopedRes<HTHUMBNAIL, DwmUnregisterThumbnail>;
 
 // ---------- Типы и константы ----------
 struct TrackedWin {
@@ -206,10 +134,10 @@ struct Theme {
 struct MapXform { double s; LONG ox, oy; RECT bounds; };
 
 // Панорама/зум жестами тачпада (двухпальцевый свайп = колесо/гориз.колесо, пинч = Ctrl+колесо)
-const double  TP_WHEEL = 0.8;            // px панорамы на единицу delta колеса
-const double         ZOOM_MIN = 0.08;           // самый дальний зум-аут
-const double         ZOOM_STEP = 1.07;          // мягкий множитель на один шаг колеса
-const double         ZOOM_EASE = 0.18;
+const double TP_WHEEL  = 0.8;    // px панорамы на единицу delta колеса
+const double ZOOM_MIN  = 0.08;   // самый дальний зум-аут
+const double ZOOM_STEP = 1.07;   // мягкий множитель на один шаг колеса
+const double ZOOM_EASE = 0.18;   // сглаживание масштаба обзора
 
 // Сохранённая раскладка окон (layout.txt)
 struct SavedWin { std::wstring cls, title; RECT world; bool used; };
@@ -239,7 +167,6 @@ struct AppState {
     // под ними визуально стоит). При выходе такие окна пересобираются на ближайшем мониторе.
     bool moveMaximized = false;
     bool hudDrag = false;                  // зажата ЛКМ на миникарте (перетаскивание)
-    int  syncCounter = 0;
     DWORD lastHudTick = 0, lastSyncTick = 0;  // троттлинг миникарты/синхронизации по времени
     KeyBind keys[HK_LAST + 1];  // индекс = HK_*
     CamMark marks[MARK_COUNT];  // закладки камеры (marks.txt)
@@ -327,76 +254,71 @@ struct AppState {
 // в wWinMain; вся остальная логика получает AppState& явно.
 inline AppState* g_app = nullptr;
 
+// Якорь зума: мировая точка (axWX,axWY) закреплена в клиентской (axCX,aCY) на масштабе
+// zoom. Прямое и обратное преобразования нужны и отрисовке обзора, и перепривязке
+// зума колесом (id_overview.cpp, id_input.cpp).
+inline double OvClientX(const AppState& app, double wx) { return app.axCX + (wx - app.axWX) * app.zoom; }
+inline double OvClientY(const AppState& app, double wy) { return app.axCY + (wy - app.axWY) * app.zoom; }
+inline double OvWorldX(const AppState& app, double cx)  { return app.axWX + (cx - app.axCX) / app.zoom; }
+inline double OvWorldY(const AppState& app, double cy)  { return app.axWY + (cy - app.axCY) / app.zoom; }
+
 // ---------- Прототипы функций модулей ----------
-bool IsDesktopClass(AppState& app, HWND h);
-void DoZoomFactor(AppState& app, double factor, POINT pt);
-void DoZoom(AppState& app, int delta, POINT pt);
-void PanWheel(AppState& app, double dxDelta, double dyDelta);
+// Только межмодульный API: используемое в одном файле объявлено static в нём же
+// и сюда не вынесено.
+// id_input.cpp — колёсный зум и глобальный хук мыши ( MouseProc нужен id_procs.cpp )
 LRESULT CALLBACK MouseProc(int code, WPARAM wp, LPARAM lp);
-std::string WToUtf8(const std::wstring& w);
-std::wstring Utf8ToW(const std::string& s);
-void WinKey(HWND h, std::wstring& cls, std::wstring& title);
-std::wstring LayoutPath();
+// id_layout.cpp — раскладка, закладки и общий каталог сохраняемых файлов
+std::wstring ConfigPath(const wchar_t* file);
 void SaveLayout(AppState& app);
 void LoadLayout(AppState& app);
-void SpreadWindows(AppState& app, const std::vector<int>& idx);
 void ArrangeOnStartup(AppState& app);
 void GatherToDesktop(AppState& app);
-void ComputeWorldBounds(AppState& app, RECT& out);
+void LoadMarks(AppState& app);
+void SetMark(AppState& app, int i);
+void GotoMark(AppState& app, int i);
+// id_minimap.cpp — преобразования и отрисовка миникарты
 void ComputeXform(AppState& app, const RECT& client);
-RECT WorldToClient(AppState& app, const RECT& w);
 void MapToWorld(AppState& app, int mx, int my, double& wx, double& wy);
 void UpdateThumbs(AppState& app, const RECT& client);
+void RefreshHud(AppState& app);   // пересчёт превью + WM_PAINT миникарты
 HFONT UiFont();
 RECT GearRect(const RECT& client);
 void DrawMinimap(AppState& app, HDC hdc, const RECT& client);
-double OvClientX(AppState& app, double wx);
-double OvClientY(AppState& app, double wy);
-RECT VisWorld(const TrackedWin& w);
+void EnsureHudCache(AppState& app, HDC ref, int w, int h);
+void ResetMapGdi(AppState& app);
+// id_overview.cpp — полноэкранный зум-обзор
 void LoadWallpaper(AppState& app);
 bool WallpaperFileChanged(AppState& app);
-void EnsureHudCache(AppState& app, HDC ref, int w, int h);
 void ShowOverview(AppState& app);
 void HideOverview(AppState& app);
 void CommitZoomCam(AppState& app);
 void UpdateOverview(AppState& app);
-void InitGraphics(AppState& app);
-BOOL CALLBACK WallMonProc(HMONITOR hm, HDC, LPRECT, LPARAM lp);
-void DrawShadow(AppState& app, const RECT& r, int radius);
 void RenderOverview(AppState& app, HWND hwnd);
+void InitGraphics(AppState& app);
+RECT VisWorld(const TrackedWin& w);
 LRESULT CALLBACK OvProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
+// id_procs.cpp — HUD-окно, WinEvent, Snap, иконки стола, DPI
 LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 DWORD WINAPI HookThreadProc(LPVOID param);
 void BringWindowIntoView(AppState& app, const TrackedWin& w);
 void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG, DWORD, DWORD);
 void DisableSnap(AppState& app);
 void RestoreSnap(AppState& app);
-BOOL CALLBACK FindDefViewProc(HWND top, LPARAM lp);
-HWND FindDesktopIcons(AppState& app);
 void HideDesktopIcons(AppState& app);
 void RestoreDesktopIcons(AppState& app);
 void EnableDpiAwareness();
+// id_settings.cpp — стиль Win11, размещение миникарты, горячие клавиши, окно настроек
 void ApplyWin11Style(AppState& app, HWND hwnd);
-std::wstring UiCfgPath();
-void SaveUiCfg(AppState& app);
 void LoadUiCfg(AppState& app);
 void PlaceHud(AppState& app);
 void InitDefaultKeys(AppState& app);
 void RegisterAllHotkeys(AppState& app);
 void UnregisterAllHotkeys(AppState& app);
-std::wstring HotkeysPath();
-void SaveHotkeys(AppState& app);
 void LoadHotkeys(AppState& app);
-std::wstring KeyName(UINT vk);
-std::wstring KeyComboText(UINT mods, UINT vk);
-bool IsModifierVk(UINT vk);
-UINT CurrentMods();
-int FindConflict(AppState& app, UINT mods, UINT vk, int exceptId);
 bool ApplyCapture(AppState& app, UINT mods, UINT vk);
 LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 void OpenSettings(AppState& app);
 // id_ui.cpp — тема и примитивы Direct2D
-void LoadTheme(AppState& app);
 void InitUi(AppState& app);
 void OnThemeChanged(AppState& app);
 COLORREF UiMix(COLORREF a, COLORREF b, float t);
@@ -407,7 +329,6 @@ void UiFillRR(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* br, const D2D1_RECT_F
 void UiStrokeRR(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* br, const D2D1_RECT_F& r, float rad, COLORREF c, float a, float w);
 void UiText(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* br, IDWriteTextFormat* f, const std::wstring& s,
             const D2D1_RECT_F& r, COLORREF c, DWRITE_TEXT_ALIGNMENT al);
-void ResetMapGdi(AppState& app);
 // id_tray.cpp — иконка в трее и общие переключатели
 void AddTrayIcon(AppState& app);
 void RefreshTrayIcon(AppState& app);
@@ -415,30 +336,18 @@ void RemoveTrayIcon(AppState& app);
 void OnTrayMessage(AppState& app, WPARAM wp, LPARAM lp);
 void ToggleMinimap(AppState& app);
 void TogglePreviews(AppState& app);
+// id_windows.cpp — фильтр/перечисление окон, превью, камера
 void UpdateVirtualScreen(AppState& app);
-bool IsCloaked(HWND h);
-bool IsManageable(AppState& app, HWND h);
-RECT ComputeVM(HWND h, const RECT& r);
-BOOL CALLBACK EnumProc(HWND h, LPARAM);
-void RegisterThumb(AppState& app, TrackedWin& w);
 void RegisterAllThumbs(AppState& app);
-void RegisterOvThumb(AppState& app, TrackedWin& w);
-BOOL CALLBACK OvZProc(HWND h, LPARAM);
 void RegisterAllOvThumbs(AppState& app);
 void RebuildWindowList(AppState& app);
 void SyncWorldFromScreen(AppState& app);
 bool IsTracked(AppState& app, HWND h);
-BOOL CALLBACK AddNewProc(HWND h, LPARAM);
 void AddNewWindows(AppState& app);
 void RepositionAll(AppState& app);
 void PanBy(AppState& app, double dx, double dy);
 void GoHome(AppState& app);
 void FocusDir(AppState& app, int dx, int dy);
-std::wstring MarksPath();
-void SaveMarks(AppState& app);
-void LoadMarks(AppState& app);
-void SetMark(AppState& app, int i);
-void GotoMark(AppState& app, int i);
 void CenterOn(AppState& app, double wx, double wy);
 
 

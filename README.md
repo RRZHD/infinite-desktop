@@ -19,7 +19,9 @@ Windows **не позволяет** интерактивно масштабир�
 ```bat
 build.bat
 ```
-Нужны установленные Visual Studio Build Tools с C++ (путь прописан в `build.bat`).
+Нужны установленные Visual Studio Build Tools с C++ — `build.bat` сам находит
+тулсет (через `vswhere`) и свежий Windows 10 SDK, без `vcvars` (его инициализация
+в VS 18 на части машин падает).
 
 ## Управление
 

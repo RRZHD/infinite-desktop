@@ -1,5 +1,5 @@
 // Окна: виртуальный экран, фильтр, перечисление, превью, перемещение, камера
-// Часть InfiniteDesktop. Компилируется как единый модуль через main.cpp.
+// Часть InfiniteDesktop.
 
 #include "id_common.h"
 
@@ -12,14 +12,14 @@ void UpdateVirtualScreen(AppState& app) {
 }
 
 // ---------- Фильтр окон (эвристика Alt+Tab) ----------
-bool IsCloaked(HWND h) {
+static bool IsCloaked(HWND h) {
     int cloaked = 0;
     if (SUCCEEDED(DwmGetWindowAttribute(h, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))))
         return cloaked != 0;
     return false;
 }
 
-bool IsManageable(AppState& app, HWND h) {
+static bool IsManageable(AppState& app, HWND h) {
     if (h == app.hud || h == app.ov) return false;
     if (!IsWindowVisible(h)) return false;
     if (IsIconic(h)) return false;                  // свёрнутые не трогаем
@@ -41,7 +41,7 @@ bool IsManageable(AppState& app, HWND h) {
 }
 
 // Отступы от GetWindowRect до видимых границ окна (невидимые рамки изменения размера).
-RECT ComputeVM(HWND h, const RECT& r) {
+static RECT ComputeVM(HWND h, const RECT& r) {
     RECT ext;
     if (SUCCEEDED(DwmGetWindowAttribute(h, DWMWA_EXTENDED_FRAME_BOUNDS, &ext, sizeof(ext)))) {
         RECT m = { ext.left - r.left, ext.top - r.top, r.right - ext.right, r.bottom - ext.bottom };
@@ -52,30 +52,32 @@ RECT ComputeVM(HWND h, const RECT& r) {
     return { 0, 0, 0, 0 };
 }
 
-BOOL CALLBACK EnumProc(HWND h, LPARAM) {
-    AppState& app = *g_app;
-    if (!IsManageable(app, h)) return TRUE;
-    RECT r;
-    if (!GetWindowRect(h, &r)) return TRUE;
+// Трекуемое окно из_rect_ ОС: мир = экран + смещение камеры (общий код EnumProc/AddNewProc).
+static TrackedWin MakeTracked(AppState& app, HWND h, const RECT& r) {
     LONG cx = (LONG)llround(app.camX), cy = (LONG)llround(app.camY);
     TrackedWin w;
     w.hwnd    = h;
     w.vm      = ComputeVM(h, r);
     w.pinned  = false;
-    w.world.left   = r.left   + cx;
-    w.world.top    = r.top    + cy;
-    w.world.right  = r.right  + cx;
-    w.world.bottom = r.bottom + cy;
-    app.wins.push_back(std::move(w));
+    w.world   = { r.left + cx, r.top + cy, r.right + cx, r.bottom + cy };
+    return w;
+}
+
+static BOOL CALLBACK EnumProc(HWND h, LPARAM) {
+    AppState& app = *g_app;
+    if (!IsManageable(app, h)) return TRUE;
+    RECT r;
+    if (!GetWindowRect(h, &r)) return TRUE;
+    app.wins.push_back(MakeTracked(app, h, r));
     return TRUE;
 }
 
 // ---------- DWM-превью ----------
-void RegisterThumb(AppState& app, TrackedWin& w) {
+// RAII: ScopedThumbnail сам снимет превью при уничтожении/перезаписи, поэтому
+// неуспех регистрации (nullptr) — просто пустое поле, чинить нечего.
+static void RegisterThumb(AppState& app, TrackedWin& w) {
     if (w.thumb || !app.hud || !app.previewsOn) return;
-    if (SUCCEEDED(DwmRegisterThumbnail(app.hud, w.hwnd, w.thumb.put()))) {
-        // RAII: ScopedThumbnail автоматически вызовет DwmUnregisterThumbnail при уничтожении
-    }
+    DwmRegisterThumbnail(app.hud, w.hwnd, w.thumb.put());
 }
 
 void RegisterAllThumbs(AppState& app) {
@@ -84,14 +86,12 @@ void RegisterAllThumbs(AppState& app) {
 
 // Превью для полноэкранного обзора (зум)
 
-void RegisterOvThumb(AppState& app, TrackedWin& w) {
+static void RegisterOvThumb(AppState& app, TrackedWin& w) {
     if (w.thumbOv || !app.ov) return;
-    if (SUCCEEDED(DwmRegisterThumbnail(app.ov, w.hwnd, w.thumbOv.put()))) {
-        // RAII: ScopedThumbnail автоматически вызовет DwmUnregisterThumbnail при уничтожении
-    }
+    DwmRegisterThumbnail(app.ov, w.hwnd, w.thumbOv.put());
 }
 
-BOOL CALLBACK OvZProc(HWND h, LPARAM) {     // собрать отслеживаемые в z-порядке
+static BOOL CALLBACK OvZProc(HWND h, LPARAM) {     // собрать отслеживаемые в z-порядке
     AppState& app = *g_app;
     for (auto& w : app.wins) if (w.hwnd == h) { app.ovZ.push_back(h); break; }
     return TRUE;
@@ -160,21 +160,12 @@ bool IsTracked(AppState& app, HWND h) {
 }
 
 // Добавить вновь появившиеся окна (открытые уже после запуска).
-BOOL CALLBACK AddNewProc(HWND h, LPARAM) {
+static BOOL CALLBACK AddNewProc(HWND h, LPARAM) {
     AppState& app = *g_app;
     if (!IsManageable(app, h) || IsTracked(app, h)) return TRUE;
     RECT r;
     if (!GetWindowRect(h, &r)) return TRUE;
-    LONG cx = (LONG)llround(app.camX), cy = (LONG)llround(app.camY);
-    TrackedWin w;
-    w.hwnd    = h;
-    w.vm      = ComputeVM(h, r);
-    w.pinned  = false;
-    w.world.left   = r.left   + cx;
-    w.world.top    = r.top    + cy;
-    w.world.right  = r.right  + cx;
-    w.world.bottom = r.bottom + cy;
-    app.wins.push_back(std::move(w));
+    app.wins.push_back(MakeTracked(app, h, r));
     if (app.hudVisible && app.previewsOn) RegisterThumb(app, app.wins.back());
     if (app.overview)                   RegisterOvThumb(app, app.wins.back());
     return TRUE;

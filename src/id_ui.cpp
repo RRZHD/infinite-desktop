@@ -18,7 +18,7 @@ static float Lum(COLORREF c) {
 // (AppsUseLightTheme), акцент — системный (DwmGetColorizationColor). Геометрия и
 // состояния элементов — по стайлгайду: поле 28–32 px, радиус 8, рамка 1 px, фокус —
 // рамка акцентом + мягкое кольцо 3 px (акцент 18 %), переключатель 38×22 с кнопкой 16.
-void LoadTheme(AppState& app) {
+static void LoadTheme(AppState& app) {
     Theme t;
     DWORD light = 0, sz = sizeof(light);
     if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",

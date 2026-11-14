@@ -6,8 +6,7 @@
 using Microsoft::WRL::ComPtr;
 
 // ---------- Полноэкранный обзор (зум через DWM-превью) ----------
-double OvClientX(AppState& app, double wx) { return app.axCX + (wx - app.axWX) * app.zoom; }
-double OvClientY(AppState& app, double wy) { return app.axCY + (wy - app.axWY) * app.zoom; }
+// Прямые/обратные преобразования якоря зума (OvClientX/Y, OvWorldX/Y) — inline в id_common.h.
 
 // Видимый мировой прямоугольник окна (без невидимых рамок) — для превью/теней/клика,
 // чтобы зазоры в обзоре совпадали с холстом.
@@ -185,13 +184,9 @@ bool WallpaperFileChanged(AppState& app) {
 // Диагностика источника обоев: %LOCALAPPDATA%\InfiniteDesktop\wall.log (дописывается).
 // Нужен, чтобы по логу с чужой машины понять, какой путь сработал — снимок или файл.
 static void WallLog(const wchar_t* fmt, ...) {
-    wchar_t buf[MAX_PATH] = {};
-    DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH);
-    std::wstring dir = (n && n < MAX_PATH) ? std::wstring(buf) : L".";
-    dir += L"\\InfiniteDesktop";
-    CreateDirectoryW(dir.c_str(), nullptr);
-    std::wstring path = dir + L"\\wall.log";
+    va_list ap;
     // Ограничиваем рост: при > 64 КБ начинаем файл заново (слайдшоу пишет строки на каждую смену).
+    std::wstring path = ConfigPath(L"wall.log");
     WIN32_FILE_ATTRIBUTE_DATA fa = {};
     bool big = GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fa) &&
                (fa.nFileSizeHigh || fa.nFileSizeLow > 65536);
@@ -199,7 +194,7 @@ static void WallLog(const wchar_t* fmt, ...) {
     if (_wfopen_s(&f, path.c_str(), big ? L"w, ccs=UTF-8" : L"a, ccs=UTF-8") || !f) return;
     SYSTEMTIME st; GetLocalTime(&st);
     fwprintf(f, L"%02d:%02d:%02d  ", st.wHour, st.wMinute, st.wSecond);
-    va_list ap; va_start(ap, fmt); vfwprintf(f, fmt, ap); va_end(ap);
+    va_start(ap, fmt); vfwprintf(f, fmt, ap); va_end(ap);
     fwprintf(f, L"\n");
     fclose(f);
 }
@@ -342,7 +337,7 @@ static bool EnsureWallD2D(AppState& app) {
 // Обои на каждом мониторе в режиме «Заполнение» (cover), с затемнением через opacity.
 // Затемнение считается GPU на лету — кэш по ступеням, нужный GDI-пути, больше не нужен.
 struct WallDrawCtx { AppState* app; float opacity; };
-BOOL CALLBACK WallMonProc(HMONITOR hm, HDC, LPRECT, LPARAM lp) {
+static BOOL CALLBACK WallMonProc(HMONITOR hm, HDC, LPRECT, LPARAM lp) {
     WallDrawCtx* c = (WallDrawCtx*)lp;
     AppState& app = *c->app;
     MONITORINFO mi = { sizeof(mi) };
@@ -366,7 +361,7 @@ BOOL CALLBACK WallMonProc(HMONITOR hm, HDC, LPRECT, LPARAM lp) {
 // альфой, накапливающихся в градиент (как тень окна Windows). Превью ложится сверху.
 // Геометрия та же, что была в GDI-версии (CreateRoundRectRgn задаёт ДИАМЕТР скругления,
 // отсюда /2 для радиуса D2D).
-void DrawShadow(AppState& app, const RECT& r, int radius) {
+static void DrawShadow(AppState& app, const RECT& r, int radius) {
     for (int i = 7; i >= 1; --i) {
         float dy = (float)(i / 2 + 1);
         float rad = (radius + i) / 2.0f;
@@ -565,10 +560,8 @@ LRESULT CALLBACK OvProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 ClickIntoWindow(app, hit, cx, cy, false);   // клик по окну — в само окно, зум остаётся
             } else {
                 // клик по фону => приблизить точку (по центру) и вернуться в 1:1
-                double wx = app.axWX + (cx - app.axCX) / app.zoom;
-                double wy = app.axWY + (cy - app.axCY) / app.zoom;
-                app.axWX = wx; app.axCX = app.vsW / 2.0;
-                app.axWY = wy; app.axCY = app.vsH / 2.0;
+                app.axWX = OvWorldX(app, cx); app.axCX = app.vsW / 2.0;
+                app.axWY = OvWorldY(app, cy); app.axCY = app.vsH / 2.0;
                 app.zoomTarget = 1.0;
             }
         }

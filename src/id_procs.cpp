@@ -1,5 +1,5 @@
 // Оконные процедуры HUD, подъезд к окну, Aero Snap, иконки, DPI
-// Часть InfiniteDesktop. Компилируется как единый модуль через main.cpp.
+// Часть InfiniteDesktop.
 
 #include "id_common.h"
 
@@ -172,11 +172,7 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd,
         if (app.moveSizeHwnd == hwnd) {
             app.moveSizeHwnd = nullptr;
             SyncWorldFromScreen(app);   // финальная позиция + перерисовка при смене размера
-            if (app.hudVisible) {
-                RECT rc; GetClientRect(app.hud, &rc);
-                ComputeXform(app, rc); UpdateThumbs(app, rc);
-                InvalidateRect(app.hud, nullptr, FALSE);
-            }
+            if (app.hudVisible) RefreshHud(app);
         }
         return;
     }
@@ -216,14 +212,13 @@ void RestoreSnap(AppState& app) {
 // Иконки рабочего стола рисует окно SHELLDLL_DefView (дочернее у Progman/WorkerW).
 // Скрываем их на время работы и возвращаем при выходе.
 
-BOOL CALLBACK FindDefViewProc(HWND top, LPARAM lp) {
-    AppState& app = *g_app;
+static BOOL CALLBACK FindDefViewProc(HWND top, LPARAM lp) {
     HWND def = FindWindowExW(top, nullptr, L"SHELLDLL_DefView", nullptr);
     if (def) { *(HWND*)lp = def; return FALSE; }
     return TRUE;
 }
 
-HWND FindDesktopIcons(AppState& app) {
+static HWND FindDesktopIcons() {
     HWND progman = FindWindowW(L"Progman", nullptr);
     HWND def = progman ? FindWindowExW(progman, nullptr, L"SHELLDLL_DefView", nullptr) : nullptr;
     if (!def) EnumWindows(FindDefViewProc, (LPARAM)&def);  // иногда внутри WorkerW
@@ -231,7 +226,7 @@ HWND FindDesktopIcons(AppState& app) {
 }
 
 void HideDesktopIcons(AppState& app) {
-    app.iconsWin = FindDesktopIcons(app);
+    app.iconsWin = FindDesktopIcons();
     if (app.iconsWin) {
         app.iconsWereVisible = IsWindowVisible(app.iconsWin) != 0;
         if (app.iconsWereVisible) ShowWindow(app.iconsWin, SW_HIDE);
