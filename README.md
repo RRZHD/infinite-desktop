@@ -1,173 +1,193 @@
-# InfiniteDesktop — бесконечный зум-канвас рабочего стола (Windows 10/11)
+# InfiniteDesktop
 
-Превращает рабочий стол в бесконечный холст: окна живут в виртуальном «мире»
-больше экрана, камера перемещается по нему, реальные окна физически переезжают
-и остаются полноразмерными и кликабельными. Зум-аут — это режим обзора
-(миникарта), клик по которому «перелетает» к нужному месту.
+**English** | [Русский](README.ru.md)
 
-## Почему именно так
+An infinite, zoomable canvas for the Windows 10/11 desktop. Windows live in a virtual
+"world" larger than the screen. You move a camera across it, and the real windows
+physically move with it, staying full-size and fully interactive. Zooming out opens a
+full-screen overview made of live window previews.
 
-Windows **не позволяет** интерактивно масштабировать живое окно чужого процесса.
-Поэтому:
-- **1:1** — полноценное взаимодействие, панорама двигает реальные окна (`SetWindowPos`).
-- **Обзор/зум-аут** — миникарта со всеми окнами и рамкой текущего экрана; клик = перелёт.
+## Download
 
-Это максимум, что разрешает ОС для управления чужими окнами.
+Get `InfiniteDesktop.exe` from the
+[latest release](https://github.com/RRZHD/infinite-desktop/releases/latest). There is no
+installer: run the file. To quit, use the tray icon or `Ctrl+Alt+Q`.
 
-## Сборка
+## How it works
+
+Windows does not let one process scale another process's live window, so there are two
+modes:
+
+- **1:1** is for normal work. Panning moves the real windows (`SetWindowPos`).
+- **Overview (zoom-out)** is a full-screen view built from live DWM thumbnails of all
+  windows. Use it to look around, rearrange windows and jump to a place.
+
+## Controls
+
+All hotkeys are global and can be changed in the settings.
+
+| Action | How |
+|---|---|
+| **Pan the canvas** | Hold the **middle mouse button** over empty desktop and drag; **two-finger swipe** on a touchpad; horizontal wheel over empty desktop |
+| Pan when the desktop is covered by windows | **`Ctrl` + middle button** anywhere, even over an application window |
+| **Zoom out** | **Mouse wheel** or **touchpad pinch** over empty desktop (or `Ctrl+wheel`) |
+| Pan in steps | `Ctrl+Alt+Arrows` |
+| Home (camera to 0,0) | `Ctrl+Alt+H` |
+| Show/hide the minimap | `Ctrl+Alt+M` |
+| Live previews on the minimap on/off | `Ctrl+Alt+P` |
+| Pin/unpin the active window | `Ctrl+Alt+F` (a pinned window stays on screen while the canvas moves) |
+| Focus the neighbouring window (left/right/up/down) | `Ctrl+Alt+Shift+Arrows`; the camera follows if the window is not fully on screen |
+| Remember a place on the canvas, 1–9 | `Ctrl+Alt+Shift+1…9` (number row or numpad) |
+| Go to place 1–9 | `Ctrl+Alt+1…9` |
+| Jump to a place | Click the minimap; hold and drag to move the camera continuously |
+| Rebuild the window list | `Ctrl+Alt+R` |
+| Quit | `Ctrl+Alt+Q` or the tray menu |
+
+## Minimap, tray and settings
+
+The **minimap** shows all windows and a frame for the current screen. It is translucent
+and can sit in any corner of the screen.
+
+The **tray icon** opens the settings on left click. Right click opens a menu: minimap,
+live previews, rebuild the window list, quit.
+
+The **settings window** opens from the tray icon or from the **⚙** button on the minimap:
+
+- **Hotkeys.** Click a shortcut and press the new one; `Esc` cancels. A shortcut that is
+  already taken is rejected with a warning.
+- **Canvas bookmarks.** "Remember place 1…9" and "Go to place 1…9" are one row each: you
+  set the modifiers, the digit is implied.
+- **Minimap corner.**
+- **Middle button moves the canvas in any window.** Panning works over any window without
+  `Ctrl`. The cost: the middle button no longer reaches applications (orbit in Blender,
+  autoscroll in a browser). The taskbar is excluded. Off by default.
+- **Maximized windows move with the canvas.** By default maximized windows stay glued to
+  their monitor. With this option they move like any other window; on exit they are
+  re-maximized on the nearest monitor.
+- **Reset to defaults.**
+
+Colours follow Windows: the system accent colour and the light or dark app theme. A
+theme change is picked up immediately.
+
+The interface language follows Windows: Russian on a Russian system, English on any other.
+
+## Bringing a window into view
+
+When you switch to a window with **Alt+Tab**, **Win+Tab** or the taskbar and that window
+is entirely off screen, the camera moves so the window fits the work area of the monitor
+under the cursor. A window that is at least partly visible is left where it is.
+
+## Layout between sessions
+
+- **On start**, windows that have a saved position return to their place on the canvas.
+  New or unmatched windows (all of them on the very first start) are laid out in rows
+  without overlapping. Matching is by window class and title, falling back to class only.
+- **On exit**, the layout is saved and all windows are gathered back onto the visible
+  desktop, into the work area of the nearest monitor.
+
+On the first start, windows that were stacked on top of each other spread across the
+canvas, so most of them end up outside the monitors. Use panning, zoom or the minimap to
+reach them.
+
+## What the app changes while it runs
+
+Both changes are reverted on exit:
+
+- **Aero Snap is turned off.** An infinite desktop has no edges to snap to.
+- **Desktop icons are hidden.**
+
+If the app crashes, turn snapping back on in *Settings → System → Multitasking → Snap
+windows*. Hidden desktop icons come back after Explorer restarts or after you sign out
+and in again.
+
+## Touchpad
+
+Precision touchpad gestures arrive as wheel events. Over empty desktop:
+
+- **Two-finger swipe** pans the canvas in both axes.
+- **Pinch** zooms.
+
+Over an application window these gestures are not intercepted, so scrolling and zooming
+inside applications work as usual. A mouse wheel is told apart from a touchpad by step
+size: a wheel notch zooms, a small touchpad delta pans.
+
+## Zoom (overview)
+
+Scrolling the mouse wheel or pinching over empty desktop zooms the whole desktop out
+around the cursor. The background is your wallpaper, dimmed more the further you zoom
+out. Previews keep the real stacking order of the windows.
+
+In the overview:
+
+- **Click (left or right) on something inside a window** presses it without leaving the
+  overview. Buttons, menus and focus work; after a click the keyboard goes to that window.
+- **Click on the background** returns to 1:1, centred on that point.
+- **Drag a preview** to move the window on the canvas.
+- **Drag the background** or hold the **middle button** to pan the overview.
+- **Wheel forward** to 100% leaves the overview.
+
+Windows cannot send input into a scaled-down live window, so clicks are delivered
+indirectly: the real window is briefly placed under the cursor behind the overview, a
+real click is injected, and the window goes back. Anything that reacts to a click works.
+Things that need a continuous cursor inside the application do not: hover, dragging,
+and wheel scrolling (the wheel zooms the overview).
+
+## Live wallpapers (Wallpaper Engine and similar)
+
+Live wallpaper programs put their own window inside the desktop window. The app accounts
+for that:
+
+- Panning and zooming work over a desktop with a live wallpaper.
+- The wallpaper keeps playing in the overview: the background is a live view of the
+  desktop, with dimming and window shadows preserved.
+- The wallpaper window is never treated as a managed window and is not moved with the
+  canvas.
+
+Tested with Wallpaper Engine on Windows 11.
+
+## Under the hood
+
+- **Multiple monitors.** The scene uses virtual-screen coordinates, so windows move
+  across the whole workspace of all monitors. Monitor configuration changes are handled.
+- **Per-monitor DPI awareness (v2)** for correct coordinates at mixed scale factors.
+- **Live previews** on the minimap and in the overview are DWM thumbnails.
+- **Direct2D** draws the overview and the settings window.
+- **Smooth motion.** Frames are paced by the DWM compositor, all windows move in one
+  batch, and only windows on screen are moved every frame.
+- **Off-screen windows are parked at the screen edge** with a one-pixel overlap, so
+  applications that minimize themselves when they leave all monitors (Photoshop and other
+  Adobe apps) keep working.
+
+Settings, layout and bookmarks are stored in `%LOCALAPPDATA%\InfiniteDesktop\`
+(`hotkeys.txt`, `ui.txt`, `layout.txt`, `marks.txt`). `wall.log` in the same folder
+records how the overview background was obtained and helps diagnose wallpaper problems.
+
+## Limitations
+
+- Windows started as administrator are not moved unless the app also runs as
+  administrator (UIPI).
+- Minimized windows are not tracked.
+- Maximized windows do not move with the canvas unless the option is turned on.
+- In the overview, hover, dragging and wheel scrolling inside a window do not work.
+- On the minimap, live previews are drawn above the screen frame and can cover it where
+  they overlap.
+
+## Ideas
+
+- Panning by pushing the screen edge.
+- An exclusion list for windows that should not be managed.
+- Separate canvases for different monitors.
+
+## Build
 
 ```bat
 build.bat
 ```
-Нужны установленные Visual Studio Build Tools с C++ — `build.bat` сам находит
-тулсет (через `vswhere`) и свежий Windows 10 SDK, без `vcvars` (его инициализация
-в VS 18 на части машин падает).
 
-## Управление
+Requires Visual Studio Build Tools with the C++ workload and a Windows 10/11 SDK.
+`build.bat` finds the toolset (through `vswhere`) and the SDK itself.
 
-| Действие                        | Как                              |
-|---------------------------------|----------------------------------|
-| **Панорама (рыскание)**         | Зажать **среднюю кнопку мыши** и тащить; **два пальца на тачпаде** (свайп вверх/вниз/влево/вправо); колесо/гориз.колесо над пустым столом |
-| Панорама, когда стол закрыт окнами | **`Ctrl` + средняя кнопка** — тащить где угодно, даже над окном приложения |
-| **Зум-аут всего стола**         | **Колесо мыши** или **пинч на тачпаде** над пустым столом (либо `Ctrl+колесо`) |
-| Приблизить к месту              | Клик по нужному окну в обзоре (возврат в 1:1) |
-| Панорама шагами                 | `Ctrl+Alt+Стрелки`               |
-| Домой (камера в 0,0)            | `Ctrl+Alt+H`                     |
-| Показать/скрыть миникарту       | `Ctrl+Alt+M`                     |
-| Вкл/выкл живые превью           | `Ctrl+Alt+P`                     |
-| Закрепить/открепить активное окно | `Ctrl+Alt+F`                   |
-| Фокус на соседнее окно (слева/справа/сверху/снизу) | `Ctrl+Alt+Shift+Стрелки` — если окно не в кадре, камера подъедет |
-| Запомнить место на холсте 1–9   | `Ctrl+Alt+Shift+1…9` (ряд или Num-блок) |
-| Перейти к месту 1–9             | `Ctrl+Alt+1…9` (плавный перелёт) |
-| Перелёт к месту                 | ЛКМ по миникарте                 |
-| Пересобрать список окон         | `Ctrl+Alt+R`                     |
-| Выход                           | `Ctrl+Alt+Q`                     |
-| Иконка в трее                   | ЛКМ — настройки; ПКМ — меню: миникарта, живые превью, пересобрать окна, выход |
+## License
 
-Миникарта **полупрозрачная**, со скруглением и шрифтом Windows 11. Нажмите **⚙**
-в её углу — откроется окно настроек (тоже полупрозрачное, в стиле Win11):
-- переназначение горячих клавиш (клик по сочетанию → нажмите новое, `Esc` — отмена;
-  при конфликте показывается предупреждение);
-- смена **угла** миникарты (строка «Угол миникарты» — клик переключает по 4 углам);
-- **«СКМ двигает холст в любом окне»** — средняя кнопка панорамирует поверх любого
-  окна, без `Ctrl` и без поиска пустого стола. Цена: СКМ внутри приложений (орбита
-  в Blender, автопрокрутка в браузере) достаётся холсту. По умолчанию выключено;
-- **«Развёрнутые окна»** — *приклеены к монитору* (по умолчанию: панорама их не двигает)
-  или *двигаются с холстом* как обычные. Во втором режиме при выходе такие окна
-  пересобираются на ближайшем мониторе, чтобы не остаться за экраном;
-- закладки «Запомнить/Перейти к месту 1…9» настраиваются одной строкой на группу:
-  задаются модификаторы, цифра подразумевается (ряд или Num-блок).
-
-Настройки сохраняются между сеансами (`%LOCALAPPDATA%\InfiniteDesktop\hotkeys.txt`,
-`ui.txt`, закладки камеры — `marks.txt`). Шестерёнка и окно настроек скрываются вместе с миникартой (`Ctrl+Alt+M`).
-
-## Подъезд к окну при переключении
-
-При выборе окна через **Win+Tab**, **Alt+Tab** или клик по панели задач стол
-**подъезжает к этому окну** (плавно центрирует камеру), если оно сейчас не видно
-целиком в текущем вьюпорте. Если окно уже на экране — стол не дёргается. Реализовано
-через `SetWinEventHook(EVENT_SYSTEM_FOREGROUND)`, окно не разворачивается — просто
-оказывается в кадре.
-
-## Сохранение раскладки и авто-разлёт
-
-- **При запуске:** окна, для которых есть сохранённая позиция (с прошлого сеанса),
-  возвращаются на свои места на холсте; новые/несопоставленные (и при самом первом
-  запуске — все) **раскладываются «полками» без наложения** — чтобы не лежали друг
-  на друге. Сопоставление по классу+заголовку окна (с запасным вариантом по классу).
-- **При выходе:** текущая раскладка сохраняется в
-  `%LOCALAPPDATA%\InfiniteDesktop\layout.txt`, после чего все окна **собираются
-  обратно на видимый рабочий стол** (в рабочую область ближайшего монитора), чтобы
-  стол оставался пригоден к работе без приложения. Aero Snap и его привязки тоже
-  восстанавливаются.
-
-При первом запуске ранее сложенные в стопку окна разлетятся по холсту — большая часть
-окажется за пределами мониторов (навигация — панорама/зум/миникарта).
-
-## Aero Snap
-
-На бесконечном столе краёв нет, поэтому при запуске приложение **отключает системное
-прилипание окон** (Aero Snap: тащишь к краю → пол-экрана, к верху → развернуть) через
-`SPI_SETWINARRANGING`. Прежнее значение сохраняется и **восстанавливается при выходе**.
-Если приложение аварийно завершится, вернуть прилипание можно в
-*Параметры → Система → Многозадачность → Прикреплять окна* или повторным запуском/выходом.
-
-## Мультитач с тачпада
-
-Жесты precision-тачпада приходят как события колеса, и над пустым рабочим столом
-обрабатываются так:
-- **Два пальца, свайп вверх/вниз/влево/вправо — панорама холста** (вертикальный и
-  горизонтальный двухпальцевый скролл двигают стол по обеим осям).
-- **Пинч (свести/развести два пальца) — зум** (тот же полноэкранный обзор).
-
-Над окном приложения двухпальцевый скролл/пинч **не перехватываются** — работает
-обычная прокрутка/зум внутри приложения. Чувствительность панорамы — `TP_WHEEL`.
-
-**Колесо мыши** отличается от тачпада по величине шага (клик колеса кратен 120) и
-работает **как зум** (как раньше); мелкий двухпальцевый скролл тачпада — панорама.
-
-## Зум (обзор)
-
-Пинч на тачпаде или `Ctrl+колесо` над пустым рабочим столом плавно
-**отдаляет весь рабочий стол**: открывается полноэкранный обзор из живых
-DWM-превью всех окон, масштаб привязан к курсору. Фон обзора — **ваши обои,
-затемнённые** тем сильнее, чем дальше отдалили (на входе/выходе бесшовно, без тёмной
-вспышки). Окна в превью наложены в правильном z-порядке (как на реальном столе).
-В обзоре:
-- **клик (ЛКМ/ПКМ) по элементу внутри окна** — нажимает его **не выходя из обзора**:
-  работают кнопки, меню, фокус (после клика клавиатура идёт в это окно);
-- **клик по фону** — плавный возврат в 1:1 с центровкой на этой точке;
-- **перетаскивание превью** — двигает окно по холсту (раскладка применяется к
-  реальным окнам при выходе из обзора);
-- **перетаскивание фона** — панорама обзора;
-- **колесо вперёд** до 100% — выход из обзора;
-- **СКМ** — двигать обзор.
-
-Windows не отдаёт ввод в уменьшенное живое окно чужого процесса, поэтому клик доставляется
-обходным путём: реальное окно (оно за оверлеем обзора, его не видно) на мгновение
-подставляется под курсор так, чтобы нажатая точка оказалась ровно под ним, инжектируется
-настоящий клик, и окно возвращается на место. Работает всё, что реагирует на клик. Не
-работает то, что требует непрерывного курсора внутри приложения: наведение (hover),
-перетаскивание, прокрутка колесом (колесо в обзоре — зум). Превью можно перетаскивать как
-плитки. При выходе окна расставляются до скрытия обзора — без «прыжка».
-
-В обычном режиме (1:1) фон — **реальные обои рабочего стола пользователя**; окна
-двигаются поверх них.
-
-## Живые обои (Wallpaper Engine и подобные)
-
-Программы живых обоев встраивают своё окно внутрь окна рабочего стола. Приложение
-это учитывает:
-- панорама средней кнопкой и зум колесом работают над столом с живыми обоями;
-- в зуме обои **продолжают идти**: фон обзора — живое превью рабочего стола (под окном
-  обзора лежит подложка с этим превью), затемнение и тени окон сохраняются;
-- окно обоев никогда не попадает в список управляемых окон и не двигается с холстом.
-
-## Что нового
-
-- **Живые превью окон** на миникарте через `DwmRegisterThumbnail` — видно реальное
-  содержимое окон, обновляется в реальном времени, следует за камерой.
-- **Мультимонитор**: сцена строится в координатах виртуального экрана
-  (`SM_*VIRTUALSCREEN`), окна перемещаются по всему рабочему пространству всех
-  мониторов. Рамка вьюпорта показывает видимую область целиком.
-- Per-monitor-v2 DPI awareness для корректных координат при разных масштабах.
-- Реакция на изменение конфигурации мониторов (`WM_DISPLAYCHANGE`).
-
-## Ограничения текущего MVP
-
-- Окна, запущенные от администратора, не двигаются, если приложение без прав админа (UIPI).
-- Свёрнутые окна не отслеживаются.
-- DWM рисует превью поверх GDI: рамка вьюпорта может перекрываться превью в местах их
-  наложения (в пустых зонах видна полностью).
-
-## Идеи для развития
-
-- Панорама краем экрана.
-- Сохранение раскладки холста между сессиями.
-- Мультимониторная виртуальная сцена.
-- Трей-иконка вместо горячей клавиши выхода.
-
-## Лицензия
-
-[MIT](LICENSE) — использовать, изменять и распространять может кто угодно;
-программа поставляется «КАК ЕСТЬ», без каких-либо гарантий.
+[MIT](LICENSE). Anyone may use, modify and distribute the program. It is provided "AS IS",
+without warranty of any kind.

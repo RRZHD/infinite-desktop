@@ -64,7 +64,7 @@ void AddTrayIcon(AppState& app) {
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP;
     nid.uCallbackMessage = WM_TRAY;
     nid.hIcon = app.trayIcon;
-    lstrcpynW(nid.szTip, L"InfiniteDesktop — бесконечный рабочий стол", ARRAYSIZE(nid.szTip));
+    lstrcpynW(nid.szTip, Tr(S_TRAY_TIP), ARRAYSIZE(nid.szTip));
     if (app.trayAdded) { Shell_NotifyIconW(NIM_MODIFY, &nid); return; }
     app.trayAdded = Shell_NotifyIconW(NIM_ADD, &nid) != FALSE;
     nid.uVersion = NOTIFYICON_VERSION_4;   // координаты и событие — в одном сообщении
@@ -106,13 +106,13 @@ void TogglePreviews(AppState& app) {
 static void ShowTrayMenu(AppState& app, int x, int y) {
     HMENU m = CreatePopupMenu();
     if (!m) return;
-    AppendMenuW(m, MF_STRING, TM_SETTINGS, L"Настройки…");
+    AppendMenuW(m, MF_STRING, TM_SETTINGS, Tr(S_MENU_SETTINGS));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING | (app.hudVisible ? MF_CHECKED : 0), TM_MAP,     L"Миникарта");
-    AppendMenuW(m, MF_STRING | (app.previewsOn ? MF_CHECKED : 0), TM_PREVIEW, L"Живые превью на карте");
-    AppendMenuW(m, MF_STRING, TM_REFRESH, L"Пересобрать список окон");
+    AppendMenuW(m, MF_STRING | (app.hudVisible ? MF_CHECKED : 0), TM_MAP,     Tr(S_MENU_MAP));
+    AppendMenuW(m, MF_STRING | (app.previewsOn ? MF_CHECKED : 0), TM_PREVIEW, Tr(S_MENU_PREVIEW));
+    AppendMenuW(m, MF_STRING, TM_REFRESH, Tr(S_MENU_REFRESH));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING, TM_EXIT, L"Выход");
+    AppendMenuW(m, MF_STRING, TM_EXIT, Tr(S_MENU_EXIT));
     SetMenuDefaultItem(m, TM_SETTINGS, FALSE);
     // Требование TrackPopupMenu: владелец должен быть активен, иначе меню не закроется
     // кликом мимо; WM_NULL после — чтобы оно закрылось корректно.

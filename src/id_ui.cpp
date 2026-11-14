@@ -51,7 +51,7 @@ static ComPtr<IDWriteTextFormat> MakeFmt(AppState& app, float px, DWRITE_FONT_WE
     ComPtr<IDWriteTextFormat> f;
     if (!app.dwFactory) return f;
     app.dwFactory->CreateTextFormat(L"Segoe UI Variable Text", nullptr, w, DWRITE_FONT_STYLE_NORMAL,
-                                    DWRITE_FONT_STRETCH_NORMAL, px, L"ru-ru", &f);
+                                    DWRITE_FONT_STRETCH_NORMAL, px, Tr(S_LOCALE), &f);
     if (f) {
         f->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);   // по вертикали — по центру строки
         f->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);

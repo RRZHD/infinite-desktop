@@ -115,6 +115,19 @@ struct CamMark { double x = 0, y = 0; bool set = false; };
 const double PAN_STEP = 400.0;   // шаг панорамы в пикселях мира
 const double EASE     = 0.22;    // коэффициент сглаживания камеры
 
+// ---------- Язык интерфейса (id_lang.cpp) ----------
+// Идентификаторы строк; порядок совпадает с таблицей STRINGS (сверяется static_assert).
+enum StrId {
+    S_LOCALE, S_KEY_PAN_LEFT, S_KEY_PAN_RIGHT, S_KEY_PAN_UP, S_KEY_PAN_DOWN, S_KEY_HOME, S_KEY_MAP,
+    S_KEY_REFRESH, S_KEY_QUIT, S_KEY_PREVIEW, S_KEY_PIN, S_KEY_FOCUS_LEFT, S_KEY_FOCUS_RIGHT,
+    S_KEY_FOCUS_UP, S_KEY_FOCUS_DOWN, S_MARK_FMT, S_GOTO_FMT, S_MARK_GROUP, S_GOTO_GROUP,
+    S_ERR_NEED_DIGIT, S_ERR_TAKEN, S_SEC_HOTKEYS, S_SEC_MARKS, S_SEC_BEHAVIOR, S_OPT_CORNER,
+    S_OPT_MMB, S_OPT_MAXMOVE, S_RESET, S_SETTINGS_TITLE, S_SETTINGS_HINT, S_CAP_KEYS, S_CAP_DIGIT,
+    S_TRAY_TIP, S_MENU_SETTINGS, S_MENU_MAP, S_MENU_PREVIEW, S_MENU_REFRESH, S_MENU_EXIT,
+    S_MAP_TIP, S_OV_HINT_FMT,
+    S_COUNT
+};
+
 // Настраиваемые горячие клавиши (сохраняются между сеансами)
 struct KeyBind { UINT mods; UINT vk; const wchar_t* name; };
 // Геометрия окна настроек
@@ -326,6 +339,9 @@ void LoadHotkeys(AppState& app);
 bool ApplyCapture(AppState& app, UINT mods, UINT vk);
 LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 void OpenSettings(AppState& app);
+// id_lang.cpp — язык интерфейса (русский на русской Windows, иначе английский)
+void InitLanguage();
+const wchar_t* Tr(StrId id);
 // id_ui.cpp — тема и примитивы Direct2D
 void InitUi(AppState& app);
 void OnThemeChanged(AppState& app);

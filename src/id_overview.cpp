@@ -537,8 +537,8 @@ void RenderOverview(AppState& app, HWND hwnd) {
     }
 
     if (app.ovTextFormat && app.ovTextBrush) {
-        wchar_t info[96];
-        wsprintfW(info, L"Обзор  %d%%   клик по окну — нажать • клик по фону — приблизить • колесо — зум • СКМ — двигать", (int)(app.zoom * 100));
+        wchar_t info[256];
+        wsprintfW(info, Tr(S_OV_HINT_FMT), (int)(app.zoom * 100));
         rt->DrawText(info, (UINT32)lstrlenW(info), app.ovTextFormat.Get(),
                      D2D1::RectF(24.0f, 20.0f, (float)rc.right, 60.0f), app.ovTextBrush.Get());
     }

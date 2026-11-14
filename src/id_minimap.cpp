@@ -159,7 +159,7 @@ void DrawMinimap(AppState& app, HDC hdc, const RECT& client) {
     SetBkMode(hdc, TRANSPARENT);
     HGDIOBJ oldFont = SelectObject(hdc, UiFont());
     SetTextColor(hdc, app.theme.muted);
-    const wchar_t* tip = L"ЛКМ — перелёт · ⚙ — настройки";
+    const wchar_t* tip = Tr(S_MAP_TIP);
     TextOutW(hdc, 12, client.bottom - 22, tip, lstrlenW(tip));
     SelectObject(hdc, oldFont);
 

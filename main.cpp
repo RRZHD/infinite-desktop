@@ -187,6 +187,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     } com;
     AppState app;          // единственный экземпляр состояния
     g_app = &app;          // для Win32-колбэков
+    InitLanguage();        // язык интерфейса — как в Windows (до создания окон и меню)
     EnableDpiAwareness();
     UpdateVirtualScreen(app);
     DisableSnap(app);          // на бесконечном столе краёв нет — выключаем Aero Snap
@@ -225,7 +226,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     // Непрозрачное: рисуется Direct2D (сглаженные скругления, кольцо фокуса).
     app.settings = CreateWindowExW(
         WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-        L"InfiniteDesktopSettings", L"Настройки",
+        L"InfiniteDesktopSettings", Tr(S_SETTINGS_TITLE),
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
         120, 120, SET_W, 480, nullptr, nullptr, hInst, nullptr);
     ApplyWin11Style(app, app.settings);

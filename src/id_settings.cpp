@@ -54,29 +54,29 @@ void PlaceHud(AppState& app) {
 
 // ---------- Горячие клавиши ----------
 void InitDefaultKeys(AppState& app) {
-    app.keys[HK_LEFT]    = { MOD_CONTROL | MOD_ALT, VK_LEFT,  L"Панорама влево" };
-    app.keys[HK_RIGHT]   = { MOD_CONTROL | MOD_ALT, VK_RIGHT, L"Панорама вправо" };
-    app.keys[HK_UP]      = { MOD_CONTROL | MOD_ALT, VK_UP,    L"Панорама вверх" };
-    app.keys[HK_DOWN]    = { MOD_CONTROL | MOD_ALT, VK_DOWN,  L"Панорама вниз" };
-    app.keys[HK_HOME]    = { MOD_CONTROL | MOD_ALT, 'H',      L"Домой (камера 0,0)" };
-    app.keys[HK_MAP]     = { MOD_CONTROL | MOD_ALT, 'M',      L"Миникарта вкл/выкл" };
-    app.keys[HK_REFRESH] = { MOD_CONTROL | MOD_ALT, 'R',      L"Пересобрать окна" };
-    app.keys[HK_QUIT]    = { MOD_CONTROL | MOD_ALT, 'Q',      L"Выход" };
-    app.keys[HK_PREVIEW] = { MOD_CONTROL | MOD_ALT, 'P',      L"Превью вкл/выкл" };
-    app.keys[HK_PIN]     = { MOD_CONTROL | MOD_ALT, 'F',      L"Закрепить окно" };
+    app.keys[HK_LEFT]    = { MOD_CONTROL | MOD_ALT, VK_LEFT,  Tr(S_KEY_PAN_LEFT) };
+    app.keys[HK_RIGHT]   = { MOD_CONTROL | MOD_ALT, VK_RIGHT, Tr(S_KEY_PAN_RIGHT) };
+    app.keys[HK_UP]      = { MOD_CONTROL | MOD_ALT, VK_UP,    Tr(S_KEY_PAN_UP) };
+    app.keys[HK_DOWN]    = { MOD_CONTROL | MOD_ALT, VK_DOWN,  Tr(S_KEY_PAN_DOWN) };
+    app.keys[HK_HOME]    = { MOD_CONTROL | MOD_ALT, 'H',      Tr(S_KEY_HOME) };
+    app.keys[HK_MAP]     = { MOD_CONTROL | MOD_ALT, 'M',      Tr(S_KEY_MAP) };
+    app.keys[HK_REFRESH] = { MOD_CONTROL | MOD_ALT, 'R',      Tr(S_KEY_REFRESH) };
+    app.keys[HK_QUIT]    = { MOD_CONTROL | MOD_ALT, 'Q',      Tr(S_KEY_QUIT) };
+    app.keys[HK_PREVIEW] = { MOD_CONTROL | MOD_ALT, 'P',      Tr(S_KEY_PREVIEW) };
+    app.keys[HK_PIN]     = { MOD_CONTROL | MOD_ALT, 'F',      Tr(S_KEY_PIN) };
     // Направленный фокус. Не Ctrl+Стрелки: это перемещение по словам в любом
     // текстовом поле, глобальный хоткей сломал бы редактирование везде.
     const UINT CAS = MOD_CONTROL | MOD_ALT | MOD_SHIFT;
-    app.keys[HK_FOCUS_LEFT]  = { CAS, VK_LEFT,  L"Фокус: окно слева" };
-    app.keys[HK_FOCUS_RIGHT] = { CAS, VK_RIGHT, L"Фокус: окно справа" };
-    app.keys[HK_FOCUS_UP]    = { CAS, VK_UP,    L"Фокус: окно сверху" };
-    app.keys[HK_FOCUS_DOWN]  = { CAS, VK_DOWN,  L"Фокус: окно снизу" };
+    app.keys[HK_FOCUS_LEFT]  = { CAS, VK_LEFT,  Tr(S_KEY_FOCUS_LEFT) };
+    app.keys[HK_FOCUS_RIGHT] = { CAS, VK_RIGHT, Tr(S_KEY_FOCUS_RIGHT) };
+    app.keys[HK_FOCUS_UP]    = { CAS, VK_UP,    Tr(S_KEY_FOCUS_UP) };
+    app.keys[HK_FOCUS_DOWN]  = { CAS, VK_DOWN,  Tr(S_KEY_FOCUS_DOWN) };
     // Закладки камеры: запомнить — с Shift, вернуться — без. Имена по номеру — для
     // сообщений о конфликтах («…уже занято: Перейти к месту 3»).
     static wchar_t markNames[MARK_COUNT][32], gotoNames[MARK_COUNT][32];
     for (int i = 0; i < MARK_COUNT; ++i) {
-        wsprintfW(markNames[i], L"Запомнить место %d", i + 1);
-        wsprintfW(gotoNames[i], L"Перейти к месту %d", i + 1);
+        wsprintfW(markNames[i], Tr(S_MARK_FMT), i + 1);
+        wsprintfW(gotoNames[i], Tr(S_GOTO_FMT), i + 1);
         app.keys[HK_MARK1 + i] = { CAS,                   (UINT)('1' + i), markNames[i] };
         app.keys[HK_GOTO1 + i] = { MOD_CONTROL | MOD_ALT, (UINT)('1' + i), gotoNames[i] };
     }
@@ -194,8 +194,8 @@ static int  RowId(int row) {
 }
 static bool IsGroup(int id) { return id == HK_MARK1 || id == HK_GOTO1; }
 static const wchar_t* RowName(AppState& app, int id) {
-    if (id == HK_MARK1) return L"Запомнить место 1…9";
-    if (id == HK_GOTO1) return L"Перейти к месту 1…9";
+    if (id == HK_MARK1) return Tr(S_MARK_GROUP);
+    if (id == HK_GOTO1) return Tr(S_GOTO_GROUP);
     return app.keys[id].name;
 }
 static std::wstring RowComboText(AppState& app, int id) {
@@ -225,18 +225,18 @@ bool ApplyCapture(AppState& app, UINT mods, UINT vk) {
     if (row < HK_LEFT) return false;
     if (IsGroup(row)) {
         UINT base = 0; int d = DigitIndex(vk, base);
-        if (d < 0) { app.status = L"Для мест: модификаторы + цифра (1…9 или Num 1…9)"; return false; }
+        if (d < 0) { app.status = Tr(S_ERR_NEED_DIGIT); return false; }
         for (int i = 0; i < MARK_COUNT; ++i) {
             int c = FindConflict(app, mods, base + i, row + i);
             if (c != -1 && !(c >= row && c < row + MARK_COUNT)) {
-                app.status = L"⚠ " + KeyComboText(mods, base + i) + L" уже занято: " + app.keys[c].name;
+                app.status = L"⚠ " + KeyComboText(mods, base + i) + Tr(S_ERR_TAKEN) + app.keys[c].name;
                 return false;
             }
         }
         for (int i = 0; i < MARK_COUNT; ++i) { app.keys[row + i].mods = mods; app.keys[row + i].vk = base + i; }
     } else {
         int c = FindConflict(app, mods, vk, row);
-        if (c != -1) { app.status = L"⚠ " + KeyComboText(mods, vk) + L" уже занято: " + app.keys[c].name; return false; }
+        if (c != -1) { app.status = L"⚠ " + KeyComboText(mods, vk) + Tr(S_ERR_TAKEN) + app.keys[c].name; return false; }
         app.keys[row].mods = mods; app.keys[row].vk = vk;
     }
     app.capRow = -1; app.status.clear();
@@ -258,18 +258,18 @@ struct SettingsLayout { std::vector<SetRow> rows; float contentH = 0; };
 SettingsLayout BuildLayout(AppState& app) {
     SettingsLayout L; float y = HDR_H;
     auto add = [&](int kind, int id, const wchar_t* t, float h) { L.rows.push_back({ kind, id, t, y, h }); y += h; };
-    add(RK_SECTION, 0, L"Горячие клавиши", SEC_H);
+    add(RK_SECTION, 0, Tr(S_SEC_HOTKEYS), SEC_H);
     for (int row = 0; row < RowCount(); ++row) {
         int id = RowId(row);
-        if (id == HK_MARK1) add(RK_SECTION, 0, L"Закладки камеры", SEC_H);
+        if (id == HK_MARK1) add(RK_SECTION, 0, Tr(S_SEC_MARKS), SEC_H);
         add(RK_HOTKEY, id, RowName(app, id), ROW_H);
     }
-    add(RK_SECTION, 0, L"Поведение", SEC_H);
-    add(RK_CORNER, 0, L"Угол миникарты", SW_H);
-    add(RK_SWITCH, 0, L"СКМ двигает холст в любом окне", SW_H);
-    add(RK_SWITCH, 1, L"Развёрнутые окна двигаются с холстом", SW_H);
+    add(RK_SECTION, 0, Tr(S_SEC_BEHAVIOR), SEC_H);
+    add(RK_CORNER, 0, Tr(S_OPT_CORNER), SW_H);
+    add(RK_SWITCH, 0, Tr(S_OPT_MMB), SW_H);
+    add(RK_SWITCH, 1, Tr(S_OPT_MAXMOVE), SW_H);
     y += 8;
-    add(RK_RESET, 0, L"Сбросить по умолчанию", 40.f);
+    add(RK_RESET, 0, Tr(S_RESET), 40.f);
     if (!app.status.empty()) add(RK_STATUS, 0, nullptr, 24.f);
     L.contentH = y + PAD;
     return L;
@@ -308,8 +308,8 @@ static void RenderSettings(AppState& app, HWND hwnd) {
     rt->BeginDraw();
     rt->Clear(ToD2D(T.bg, 1.0f));
     rt->SetTransform(D2D1::Matrix3x2F::Translation(0.f, -(float)app.setScroll));
-    UiText(rt, br, app.fmtTitle.Get(), L"Настройки", D2D1_RECT_F{ PAD, 12.f, W - PAD, 34.f }, T.text, DWRITE_TEXT_ALIGNMENT_LEADING);
-    UiText(rt, br, app.fmtSmall.Get(), L"Клик по сочетанию — нажмите новое · Esc — отмена",
+    UiText(rt, br, app.fmtTitle.Get(), Tr(S_SETTINGS_TITLE), D2D1_RECT_F{ PAD, 12.f, W - PAD, 34.f }, T.text, DWRITE_TEXT_ALIGNMENT_LEADING);
+    UiText(rt, br, app.fmtSmall.Get(), Tr(S_SETTINGS_HINT),
            { PAD, 34.f, W - PAD, 52.f }, T.muted, DWRITE_TEXT_ALIGNMENT_LEADING);
     for (auto& r : L.rows) {
         D2D1_RECT_F label = { PAD, r.y, W - PAD - CTRL_W - 12.f, r.y + r.h };
@@ -332,7 +332,7 @@ static void RenderSettings(AppState& app, HWND hwnd) {
             } else {
                 UiStrokeRR(rt, br, c, RAD, T.border, 1.0f, 1.f);
             }
-            std::wstring t = cap ? (IsGroup(r.id) ? L"модификаторы + цифра…" : L"нажмите клавиши…")
+            std::wstring t = cap ? (IsGroup(r.id) ? Tr(S_CAP_DIGIT) : Tr(S_CAP_KEYS))
                                  : RowComboText(app, r.id);
             UiText(rt, br, app.fmtCtrl.Get(), t, c, cap ? T.accentInk : T.text, DWRITE_TEXT_ALIGNMENT_CENTER);
             break;
