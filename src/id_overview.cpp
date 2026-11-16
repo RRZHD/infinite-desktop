@@ -6,6 +6,7 @@
 using Microsoft::WRL::ComPtr;
 
 static HWND FindLiveWallpaperHost();   // определена ниже, рядом со снимком стола
+static void LogWindowChain(const wchar_t* what, HWND h);
 
 // ---------- Полноэкранный обзор (зум через DWM-превью) ----------
 // Прямые/обратные преобразования якоря зума (OvClientX/Y, OvWorldX/Y) — inline в id_common.h.
@@ -19,6 +20,13 @@ RECT VisWorld(const TrackedWin& w) {
 
 void ShowOverview(AppState& app) {
     if (app.overview) return;
+    // Над каким окном колесо запустило зум — в лог, по разу на окно: если зум сработает
+    // там, где должна быть прокрутка, по записи видно, что система отдала под курсором.
+    HWND src = app.zoomSrc.exchange(nullptr, std::memory_order_relaxed);
+    if (src && src != app.zoomSrcLogged) {
+        app.zoomSrcLogged = src;
+        LogWindowChain(L"zoom started over", src);
+    }
     // Живые обои (Wallpaper Engine и т.п.): фон обзора — не снимок, а живое DWM-превью
     // окна-хоста, чтобы обои продолжали идти и в зуме. DWM-превью всегда рисуются поверх
     // содержимого своего окна, поэтому в одном окне порядок «обои → тени → окна» не
@@ -267,7 +275,7 @@ bool WallpaperFileChanged(AppState& app) {
 // сборках PrintWindow возвращает чёрное — тогда false, и остаётся декод файла.
 // Диагностика источника обоев: %LOCALAPPDATA%\InfiniteDesktop\wall.log (дописывается).
 // Нужен, чтобы по логу с чужой машины понять, какой путь сработал — снимок или файл.
-static void WallLog(const wchar_t* fmt, ...) {
+void WallLog(const wchar_t* fmt, ...) {
     va_list ap;
     // Ограничиваем рост: при > 64 КБ начинаем файл заново (слайдшоу пишет строки на каждую смену).
     std::wstring path = ConfigPath(L"wall.log");
@@ -281,6 +289,81 @@ static void WallLog(const wchar_t* fmt, ...) {
     va_start(ap, fmt); vfwprintf(f, fmt, ap); va_end(ap);
     fwprintf(f, L"\n");
     fclose(f);
+}
+
+// ---------- Диагностика устройства рабочего стола ----------
+// Раскладка окон стола различается между сборками Windows и меняется программами обоев
+// и модами оболочки, а воспроизвести чужую систему нельзя — поэтому пишем её в wall.log.
+static std::wstring ExeName(DWORD pid) {
+    std::wstring name = L"?";
+    HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!p) return name;
+    wchar_t buf[MAX_PATH]; DWORD n = MAX_PATH;
+    if (QueryFullProcessImageNameW(p, 0, buf, &n)) {
+        const wchar_t* slash = wcsrchr(buf, L'\\');
+        name = slash ? slash + 1 : buf;
+    }
+    CloseHandle(p);
+    return name;
+}
+
+struct TreeCtx { std::wstring text; DWORD hostPid; int count; };
+static BOOL CALLBACK TreeChildProc(HWND c, LPARAM lp) {
+    TreeCtx* x = (TreeCtx*)lp;
+    if (++x->count > 12) { x->text += L" ..."; return FALSE; }
+    wchar_t cls[64] = {};
+    GetClassNameW(c, cls, 64);
+    DWORD pid = 0;
+    GetWindowThreadProcessId(c, &pid);
+    int vis = (GetWindowLongW(c, GWL_STYLE) & WS_VISIBLE) ? 1 : 0;   // свой флаг, без учёта родителя
+    x->text += L" ";
+    if (pid != x->hostPid) { x->text += ExeName(pid); x->text += L":"; }
+    x->text += cls;
+    x->text += vis ? L"(1)" : L"(0)";
+    return TRUE;
+}
+static BOOL CALLBACK TreeTopProc(HWND h, LPARAM lp) {
+    wchar_t cls[32] = {};
+    GetClassNameW(h, cls, 32);
+    if (lstrcmpW(cls, L"WorkerW") && lstrcmpW(cls, L"Progman")) return TRUE;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(h, &pid);
+    if (pid != *(DWORD*)lp) return TRUE;                 // только окна процесса оболочки
+    RECT r = {};
+    GetWindowRect(h, &r);
+    if (r.right - r.left < 200) return TRUE;             // служебные окна-пустышки
+    TreeCtx x = { L"", pid, 0 };
+    EnumChildWindows(h, TreeChildProc, (LPARAM)&x);
+    WallLog(L"  %s %p vis=%d ex=%08X %d,%d %dx%d:%s", cls, h, IsWindowVisible(h) ? 1 : 0,
+            (unsigned)GetWindowLongW(h, GWL_EXSTYLE), r.left, r.top, r.right - r.left, r.bottom - r.top,
+            x.text.empty() ? L" -" : x.text.c_str());
+    return TRUE;
+}
+// Окна рабочего стола сверху вниз (порядок EnumWindows — z-порядок); у дочерних в скобках
+// их собственный флаг видимости, у окон чужих процессов — имя программы.
+void LogDesktopTree(const wchar_t* why) {
+    DWORD pid = 0;
+    HWND shell = GetShellWindow();
+    if (shell) GetWindowThreadProcessId(shell, &pid);
+    WallLog(L"desktop tree (%s), shell %p:", why, shell);
+    EnumWindows(TreeTopProc, (LPARAM)&pid);
+}
+
+// Цепочка классов от окна до корня и программа-владелец — чтобы по логу было видно,
+// какое именно окно приложение приняло за рабочий стол.
+static void LogWindowChain(const wchar_t* what, HWND h) {
+    std::wstring chain;
+    int depth = 0;
+    for (HWND c = h; c && depth < 10; c = GetAncestor(c, GA_PARENT), depth++) {
+        wchar_t cls[64] = {};
+        GetClassNameW(c, cls, 64);
+        if (!lstrcmpW(cls, L"#32769")) break;            // дошли до окна рабочего стола системы
+        if (depth) chain += L" < ";
+        chain += cls;
+    }
+    DWORD pid = 0;
+    GetWindowThreadProcessId(h, &pid);
+    WallLog(L"%s: %p %s [%s]", what, h, chain.c_str(), ExeName(pid).c_str());
 }
 
 static BOOL CALLBACK CollectWorkerW(HWND h, LPARAM lp) {

@@ -252,8 +252,12 @@ struct AppState {
     HWND moveSizeHwnd = nullptr;           // окно, которое пользователь сейчас тащит/ресайзит мышью
                                            // (между EVENT_SYSTEM_MOVESIZESTART и ...END); nullptr — никакое
     BOOL prevWinArranging = TRUE;          // прежнее состояние Aero Snap
-    HWND iconsWin = nullptr;               // окно иконок рабочего стола
+    HWND iconsWin = nullptr;               // окно иконок рабочего стола (SHELLDLL_DefView)
     bool iconsWereVisible = false;
+    HWND iconsLayer = nullptr;             // скрытое нами окно-слой иконок (отдельный WorkerW), если такой есть
+    // Диагностика: окно, над которым колесо запустило зум (пишет hook-поток, читает ShowOverview).
+    std::atomic<HWND> zoomSrc = nullptr;
+    HWND zoomSrcLogged = nullptr;
 
     // Кэш GDI-объектов миникарты (перья/кисти создаются один раз)
     ScopedPen   framePen, pinPen, vpPen;
@@ -317,6 +321,8 @@ void InitGraphics(AppState& app);
 void CreateOverviewBackdrop(AppState& app, HINSTANCE hi);
 RECT VisWorld(const TrackedWin& w);
 LRESULT CALLBACK OvProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
+void WallLog(const wchar_t* fmt, ...);          // строка в wall.log (диагностика стола и обоев)
+void LogDesktopTree(const wchar_t* why);        // окна рабочего стола оболочки — в wall.log
 // id_procs.cpp — HUD-окно, WinEvent, Snap, иконки стола, DPI
 LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 DWORD WINAPI HookThreadProc(LPVOID param);

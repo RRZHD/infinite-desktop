@@ -225,29 +225,69 @@ static HWND FindDesktopIcons() {
     return def;
 }
 
-void HideDesktopIcons(AppState& app) {
-    app.iconsWin = FindDesktopIcons();
-    if (app.iconsWin) {
-        app.iconsWereVisible = IsWindowVisible(app.iconsWin) != 0;
-        if (app.iconsWereVisible) ShowWindow(app.iconsWin, SW_HIDE);
-    }
+// Где живёт DefView, зависит от системы:
+//  - прямо в Progman — Windows 11 24H2+ и Windows 10, пока стол не разнесён на слои;
+//  - в отдельном окне верхнего уровня WorkerW, лежащем ПОВЕРХ слоя обоев, — так Windows 10
+//    и ранние сборки 11 раскладывают стол после сообщения 0x052C (его шлют программы
+//    живых обоев и сама оболочка при плавной смене обоев).
+// В первом случае хватает скрыть DefView. Во втором этого мало: окно-слой остаётся в
+// композиции уже без представления иконок, которое обычно закрывает его целиком, и его
+// поверхность накладывается на обои под ним. По issue #4 (Windows 10 + Wallpaper Engine)
+// стол при этом заметно светлеет, а до v1.0.15 живые обои могли не показаться вовсе.
+// Поэтому слой, в котором нет ничего, кроме иконок, скрываем целиком.
+struct LayerCtx { HWND def; bool other; };
+static BOOL CALLBACK LayerChildProc(HWND c, LPARAM lp) {
+    LayerCtx* x = (LayerCtx*)lp;
+    if (c == x->def || IsChild(x->def, c)) return TRUE;                 // сами иконки
+    if (GetWindowLongW(c, GWL_STYLE) & WS_VISIBLE) { x->other = true; return FALSE; }
+    return TRUE;
+}
+static HWND IconsLayerOf(HWND def) {
+    HWND top = GetAncestor(def, GA_ROOT);
+    wchar_t cls[32] = {};
+    if (!top || top == def || !GetClassNameW(top, cls, 32) || lstrcmpW(cls, L"WorkerW")) return nullptr;
+    LayerCtx x = { def, false };
+    EnumChildWindows(top, LayerChildProc, (LPARAM)&x);   // в слое есть что-то ещё (обои?) — не трогаем
+    return x.other ? nullptr : top;
 }
 
-// Explorer перезапустился (сбой, обновление, перезапуск из-за модов оболочки) — окно
-// иконок пересоздано, прежний хэндл мёртв, а новые иконки снова видны. Прячем заново.
-// Вызывается из фоновой синхронизации; в обычной ситуации это один IsWindow.
+// Спрятать иконки, а если они в отдельном слое — и слой. Вызывается при старте и из
+// фоновой синхронизации: окно иконок пересоздаётся при перезапуске Explorer (сбой,
+// обновление, моды оболочки), а при запуске программы живых обоев оболочка переносит его
+// в новый слой и показывает тот заново. В обычной ситуации это несколько дешёвых проверок.
 void RecheckDesktopIcons(AppState& app) {
-    if (app.iconsWin && IsWindow(app.iconsWin)) {
-        // окно то же, но иконки снова показаны (гонка при старте Explorer) — прячем
-        if (IsWindowVisible(app.iconsWin)) { app.iconsWereVisible = true; ShowWindow(app.iconsWin, SW_HIDE); }
-        return;
+    bool fresh = false;
+    if (!app.iconsWin || !IsWindow(app.iconsWin)) {
+        app.iconsWin = FindDesktopIcons();
+        app.iconsWereVisible = false;
+        app.iconsLayer = nullptr;
+        if (!app.iconsWin) return;
+        fresh = true;
     }
-    HideDesktopIcons(app);
+    // Собственный флаг видимости, а не IsWindowVisible: та вернёт FALSE и для видимого
+    // окна внутри скрытого слоя.
+    if (GetWindowLongW(app.iconsWin, GWL_STYLE) & WS_VISIBLE) {
+        app.iconsWereVisible = true;
+        ShowWindow(app.iconsWin, SW_HIDE);
+    }
+    HWND layer = IconsLayerOf(app.iconsWin);
+    bool layerChanged = (layer != app.iconsLayer);
+    if (layer && IsWindowVisible(layer)) ShowWindow(layer, SW_HIDE);
+    app.iconsLayer = layer;
+    if (fresh || layerChanged)
+        LogDesktopTree(layer ? L"icons hidden with their layer" : L"icons hidden");
 }
 
+void HideDesktopIcons(AppState& app) {
+    RecheckDesktopIcons(app);
+}
+
+// Сначала иконки (пока слой скрыт), потом слой — чтобы пустой слой не мелькнул над обоями.
 void RestoreDesktopIcons(AppState& app) {
-    if (app.iconsWin && app.iconsWereVisible && IsWindow(app.iconsWin))
-        ShowWindow(app.iconsWin, SW_SHOW);
+    if (!app.iconsWin || !IsWindow(app.iconsWin)) return;
+    if (app.iconsWereVisible) ShowWindow(app.iconsWin, SW_SHOWNA);
+    if (app.iconsLayer && IsWindow(app.iconsLayer) && GetAncestor(app.iconsWin, GA_ROOT) == app.iconsLayer)
+        ShowWindow(app.iconsLayer, SW_SHOWNA);
 }
 
 // Включить осведомлённость о DPI на уровне монитора (для точных координат

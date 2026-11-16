@@ -160,7 +160,8 @@ Tested with Wallpaper Engine on Windows 11.
 
 Settings, layout and bookmarks are stored in `%LOCALAPPDATA%\InfiniteDesktop\`
 (`hotkeys.txt`, `ui.txt`, `layout.txt`, `marks.txt`). `wall.log` in the same folder
-records how the overview background was obtained and helps diagnose wallpaper problems.
+records how the overview background was obtained, how the desktop windows are laid out
+and which window a wheel zoom started over. It helps diagnose wallpaper and input problems.
 
 ## Limitations
 

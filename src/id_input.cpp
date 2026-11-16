@@ -10,17 +10,33 @@ static bool ClassIs(HWND h, const wchar_t* a, const wchar_t* b) {
     return !lstrcmpW(cls, a) || !lstrcmpW(cls, b);
 }
 
-// Под курсором — рабочий стол? Кроме окон самого стола считаем столом и любое окно,
-// корень которого — Progman/WorkerW: так устроены живые обои (Wallpaper Engine, Lively) —
-// их окно сидит внутри окна рабочего стола, и, раз иконки мы прячем, клик по «пустому
-// столу» попадает именно в него. Без этого панорама СКМ и зум колесом над столом
-// с живыми обоями не срабатывали бы.
+// Окно верхнего уровня — рабочий стол оболочки: Progman либо WorkerW того же процесса
+// (слои стола на Windows 10 и ранних сборках 11). WorkerW — общее имя класса, такие окна
+// создают и другие программы, поэтому сверяем процесс с окном оболочки.
+static bool IsDesktopRoot(HWND root) {
+    if (!ClassIs(root, L"WorkerW", L"Progman")) return false;
+    HWND shell = GetShellWindow();
+    if (!shell) return true;                  // нестандартная оболочка — верим классу
+    DWORD a = 0, b = 0;
+    GetWindowThreadProcessId(root, &a);
+    GetWindowThreadProcessId(shell, &b);
+    return a == b;
+}
+
+// Под курсором — рабочий стол? Решает КОРЕНЬ окна, а не его собственный класс: столом
+// считается всё, что лежит внутри окна рабочего стола, — иконки, служебные слои и окно
+// живых обоев (Wallpaper Engine, Lively: оно сидит внутри стола, и клик по «пустому
+// столу» попадает именно в него).
+// Проверять класс самого окна нельзя: SHELLDLL_DefView, SysListView32 и WorkerW есть и
+// внутри обычного окна Проводника (представление папки, классический список файлов,
+// панель адреса), а SysListView32 — в массе других программ. Стоило системе отдать под
+// курсором такое окно — колесо зумило холст вместо прокрутки списка, а СКМ начинала
+// панораму (issue #4: Проводник на Windows 10 с модами оболочки).
 static bool IsDesktopClass(AppState& app, HWND h) {
-    if (!h) return true;
+    if (!h) return false;                     // окна нет — ввод не наш
     if (h == app.ov) return true;
-    if (ClassIs(h, L"WorkerW", L"Progman") || ClassIs(h, L"SHELLDLL_DefView", L"SysListView32")) return true;
     HWND root = GetAncestor(h, GA_ROOT);
-    return root && root != h && ClassIs(root, L"WorkerW", L"Progman");
+    return root && IsDesktopRoot(root);
 }
 
 // Под курсором — панель задач (основная или на втором мониторе)?
@@ -105,11 +121,16 @@ LRESULT CALLBACK MouseProc(int code, WPARAM wp, LPARAM lp) {
             if (app.dragging.load(std::memory_order_acquire)) return 1;   // во время панорамы СКМ колесо не зумит
             int delta = (short)HIWORD(m->mouseData);
             bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-            bool onDesk = app.overview || IsDesktopClass(app, WindowFromPoint(m->pt));
+            HWND under = app.overview ? nullptr : WindowFromPoint(m->pt);
+            bool onDesk = app.overview || IsDesktopClass(app, under);
             if (!onDesk) break;                              // внутри приложения — обычная прокрутка
             // Колесо мыши отправляет >= WHEEL_DELTA на клик. Мелкая дельта тачпада — панорама.
             bool mouseWheel = (abs(delta) >= WHEEL_DELTA);
-            if (ctrl || mouseWheel) { DoZoom(app, delta, m->pt); return 1; }   // зум
+            if (ctrl || mouseWheel) {                        // зум
+                if (under) app.zoomSrc.store(under, std::memory_order_relaxed);   // для wall.log
+                DoZoom(app, delta, m->pt);
+                return 1;
+            }
             PanWheel(app, 0.0, (double)delta); return 1;          // 2 пальца верт. => панорама
         }
         case WM_MOUSEHWHEEL: {
