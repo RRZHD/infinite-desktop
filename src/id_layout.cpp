@@ -32,29 +32,75 @@ static std::wstring Utf8ToW(const std::string& s) {
     return w;
 }
 
-static void WinKey(HWND h, std::wstring& cls, std::wstring& title) {
+static void WinKey(HWND h, WinKeyId& k) {
     wchar_t c[128] = {};
     GetClassNameW(h, c, 128);
-    cls = c;
+    k.cls = c;
     int n = GetWindowTextLengthW(h);
     std::wstring t((size_t)n + 1, 0);
     int got = GetWindowTextW(h, &t[0], n + 1);
     t.resize(got < 0 ? 0 : got);
-    title = t;
+    // Заголовок попадает в строку файла целиком: перевод строки в нём разорвал бы запись.
+    for (auto& ch : t) if (ch == L'\n' || ch == L'\r') ch = L' ';
+    k.title = t;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(h, &pid);
+    k.exe = ExeName(pid);
+    for (auto& ch : k.exe) ch = (wchar_t)towlower(ch);
 }
 
-// Сохранить мировые позиции всех окон (формат: L<TAB>T<TAB>R<TAB>B<TAB>class<TAB>title).
+// Сохранить мировые позиции всех окон. Формат v2: первая строка «v2», далее
+// L<TAB>T<TAB>R<TAB>B<TAB>exe<TAB>class<TAB>title. В старом формате (без заголовка) поля
+// exe нет. Пишем во временный файл и подменяем им прежний: автосохранение идёт во время
+// работы, и оборванная запись не должна оставить половину раскладки.
 void SaveLayout(AppState& app) {
-    std::ofstream f(ConfigPath(L"layout.txt").c_str(), std::ios::binary | std::ios::trunc);
-    if (!f) return;
-    for (auto& w : app.wins) {
-        if (!IsWindow(w.hwnd)) continue;
-        std::wstring cls, title;
-        WinKey(w.hwnd, cls, title);
-        std::string line = std::to_string(w.world.left)  + "\t" + std::to_string(w.world.top) + "\t"
-                         + std::to_string(w.world.right) + "\t" + std::to_string(w.world.bottom) + "\t"
-                         + WToUtf8(cls) + "\t" + WToUtf8(title) + "\n";
-        f.write(line.data(), (std::streamsize)line.size());
+    std::wstring path = ConfigPath(L"layout.txt"), tmp = path + L".tmp";
+    {
+        std::ofstream f(tmp.c_str(), std::ios::binary | std::ios::trunc);
+        if (!f) return;
+        f.write("v2\n", 3);
+        auto put = [&](HWND hwnd, const RECT& world) {
+            if (!IsWindow(hwnd)) return;
+            WinKeyId k;
+            WinKey(hwnd, k);
+            std::string line = std::to_string(world.left)  + "\t" + std::to_string(world.top) + "\t"
+                             + std::to_string(world.right) + "\t" + std::to_string(world.bottom) + "\t"
+                             + WToUtf8(k.exe) + "\t" + WToUtf8(k.cls) + "\t" + WToUtf8(k.title) + "\n";
+            f.write(line.data(), (std::streamsize)line.size());
+        };
+        for (auto& w : app.wins) put(w.hwnd, w.world);
+        // Свёрнутые и скрытые окна тоже: иначе Win+D перед выключением сохранил бы пустой стол.
+        for (auto& a : app.away) put(a.hwnd, a.world);
+        if (!f.good()) return;
+    }
+    MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
+}
+
+// Автосохранение. Раньше раскладка писалась только при чистом выходе, а программа в трее
+// чаще всего заканчивает работу вместе с Windows или после сбоя — и раскладка терялась.
+// Сохраняем, когда позиции окон изменились и 3 секунды не менялись (перетаскивание,
+// открытие пачки окон не должны писать файл на каждый шаг).
+void AutoSaveLayout(AppState& app) {
+    if (app.sessionEnding) return;   // Windows закрывает окна — раскладка уже сохранена
+    unsigned long long h = 1469598103934665603ULL;   // FNV-1a по окнам и их мировым позициям
+    auto mix = [&](unsigned long long v) { h = (h ^ v) * 1099511628211ULL; };
+    auto mixWin = [&](HWND hwnd, const RECT& r) {
+        mix((unsigned long long)(UINT_PTR)hwnd);
+        mix((unsigned long long)(unsigned)r.left);  mix((unsigned long long)(unsigned)r.top);
+        mix((unsigned long long)(unsigned)r.right); mix((unsigned long long)(unsigned)r.bottom);
+    };
+    for (auto& w : app.wins) mixWin(w.hwnd, w.world);
+    for (auto& a : app.away) mixWin(a.hwnd, a.world);
+    DWORD now = GetTickCount();
+    if (h != app.layoutHash) {
+        bool first = (app.layoutHash == 0);   // стартовая раскладка только что загружена — не пишем
+        app.layoutHash = h;
+        if (!first) { app.layoutDirty = true; app.layoutChangedTick = now; }
+        return;
+    }
+    if (app.layoutDirty && now - app.layoutChangedTick >= 3000) {
+        app.layoutDirty = false;
+        SaveLayout(app);
     }
 }
 
@@ -63,8 +109,11 @@ void LoadLayout(AppState& app) {
     std::ifstream f(ConfigPath(L"layout.txt").c_str(), std::ios::binary);
     if (!f) return;
     std::string line;
+    bool v2 = false;
+    bool firstLine = true;
     while (std::getline(f, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (firstLine) { firstLine = false; if (line == "v2") { v2 = true; continue; } }
         if (line.empty()) continue;
         long v[4]; size_t p = 0; bool ok = true;
         for (int i = 0; i < 4 && ok; ++i) {
@@ -74,9 +123,15 @@ void LoadLayout(AppState& app) {
             p = t + 1;
         }
         if (!ok) continue;
+        SavedWin sw;
+        if (v2) {                                   // exe — отдельным полем перед классом
+            size_t t = line.find('\t', p);
+            if (t == std::string::npos) continue;
+            sw.exe = Utf8ToW(line.substr(p, t - p));
+            p = t + 1;
+        }
         size_t t = line.find('\t', p);          // граница class|title
         if (t == std::string::npos) continue;
-        SavedWin sw;
         sw.cls   = Utf8ToW(line.substr(p, t - p));
         sw.title = Utf8ToW(line.substr(t + 1));
         sw.world.left = v[0]; sw.world.top = v[1]; sw.world.right = v[2]; sw.world.bottom = v[3];
@@ -115,34 +170,44 @@ static void SpreadWindows(AppState& app, const std::vector<int>& idx) {
     }
 }
 
-// При запуске: вернуть окна на сохранённые места; новые/несопоставленные — разложить.
-void ArrangeOnStartup(AppState& app) {
-    std::vector<bool> assigned(app.wins.size(), false);
-    auto tryAssign = [&](bool exact) {
-        for (size_t i = 0; i < app.wins.size(); ++i) {
-            if (assigned[i]) continue;
-            std::wstring cls, title;
-            WinKey(app.wins[i].hwnd, cls, title);
-            for (auto& s : app.saved) {
-                if (s.used) continue;
-                if (s.cls != cls) continue;
-                if (exact && s.title != title) continue;
-                LONG w = app.wins[i].world.right - app.wins[i].world.left;
-                LONG h = app.wins[i].world.bottom - app.wins[i].world.top;
-                app.wins[i].world.left = s.world.left;  app.wins[i].world.top = s.world.top;
-                app.wins[i].world.right = s.world.left + w;
-                app.wins[i].world.bottom = s.world.top + h;   // позиция из файла, размер текущий
-                s.used = true; assigned[i] = true;
+// Сопоставить окна с сохранённой раскладкой: для каждого ключа — индекс записи или -1.
+// Два прохода: точное совпадение (программа + класс + заголовок), затем программа + класс
+// (заголовок мог измениться). Программа сверяется обязательно: класс окна у Chrome, Edge,
+// VS Code и прочих приложений на Chromium/Electron один и тот же, и по одному классу окно
+// одной программы вставало на место другой. У записей старого формата программы нет —
+// для них остаётся прежнее сопоставление по классу.
+std::vector<int> MatchSavedLayout(std::vector<SavedWin>& saved, const std::vector<WinKeyId>& keys) {
+    std::vector<int> match(keys.size(), -1);
+    for (int pass = 0; pass < 2; ++pass) {
+        for (size_t i = 0; i < keys.size(); ++i) {
+            if (match[i] >= 0) continue;
+            for (size_t j = 0; j < saved.size(); ++j) {
+                SavedWin& s = saved[j];
+                if (s.used || s.cls != keys[i].cls) continue;
+                if (!s.exe.empty() && s.exe != keys[i].exe) continue;
+                if (pass == 0 && s.title != keys[i].title) continue;
+                s.used = true; match[i] = (int)j;
                 break;
             }
         }
-    };
-    tryAssign(true);    // точное совпадение class+title
-    tryAssign(false);   // запасное — по одному классу (заголовок мог измениться)
+    }
+    return match;
+}
+
+// При запуске: вернуть окна на сохранённые места; новые/несопоставленные — разложить.
+void ArrangeOnStartup(AppState& app) {
+    std::vector<WinKeyId> keys(app.wins.size());
+    for (size_t i = 0; i < app.wins.size(); ++i) WinKey(app.wins[i].hwnd, keys[i]);
+    std::vector<int> match = MatchSavedLayout(app.saved, keys);
 
     std::vector<int> toSpread;
-    for (size_t i = 0; i < app.wins.size(); ++i)
-        if (!assigned[i]) toSpread.push_back((int)i);
+    for (size_t i = 0; i < app.wins.size(); ++i) {
+        if (match[i] < 0) { toSpread.push_back((int)i); continue; }
+        const RECT& s = app.saved[match[i]].world;
+        LONG w = app.wins[i].world.right - app.wins[i].world.left;
+        LONG h = app.wins[i].world.bottom - app.wins[i].world.top;
+        app.wins[i].world = { s.left, s.top, s.left + w, s.top + h };   // позиция из файла, размер текущий
+    }
     SpreadWindows(app, toSpread);
 }
 
@@ -187,6 +252,17 @@ void GotoMark(AppState& app, int i) {
     app.targetY = app.marks[i].y;
 }
 
+// Вписать прямоугольник в рабочую область (сдвигом, без изменения размера).
+static void ClampInto(const RECT& work, RECT& r) {
+    LONG ww = r.right - r.left, hh = r.bottom - r.top;
+    LONG x = r.left, y = r.top;
+    if (x + ww > work.right)  x = work.right - ww;
+    if (y + hh > work.bottom) y = work.bottom - hh;
+    if (x < work.left) x = work.left;
+    if (y < work.top)  y = work.top;
+    r = { x, y, x + ww, y + hh };
+}
+
 // При выходе: собрать окна на видимый рабочий стол (в рабочую область монитора).
 void GatherToDesktop(AppState& app) {
     for (auto& w : app.wins) {
@@ -201,13 +277,25 @@ void GatherToDesktop(AppState& app) {
         if (!GetWindowRect(w.hwnd, &r)) continue;
         MONITORINFO mi = { sizeof(mi) };
         if (!GetMonitorInfoW(MonitorFromWindow(w.hwnd, MONITOR_DEFAULTTONEAREST), &mi)) continue;
-        LONG ww = r.right - r.left, hh = r.bottom - r.top;
-        LONG x = r.left, y = r.top;
-        if (x + ww > mi.rcWork.right)  x = mi.rcWork.right - ww;
-        if (y + hh > mi.rcWork.bottom) y = mi.rcWork.bottom - hh;
-        if (x < mi.rcWork.left) x = mi.rcWork.left;
-        if (y < mi.rcWork.top)  y = mi.rcWork.top;
-        SetWindowPos(w.hwnd, nullptr, x, y, 0, 0,
+        RECT to = r;
+        ClampInto(mi.rcWork, to);
+        SetWindowPos(w.hwnd, nullptr, to.left, to.top, 0, 0,
                      SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    // Свёрнутые и скрытые окна, ушедшие «с парковки»: их обычное положение — у края экрана,
+    // и после выхода программы окно развернулось бы туда же, почти целиком за экраном.
+    // Правим положение, не разворачивая и не показывая окно.
+    for (auto& a : app.away) {
+        if (!a.parked || !IsWindow(a.hwnd)) continue;
+        WINDOWPLACEMENT wp = { sizeof(wp) };
+        if (!GetWindowPlacement(a.hwnd, &wp)) continue;
+        MONITORINFO mi = { sizeof(mi) };
+        if (!GetMonitorInfoW(MonitorFromRect(&wp.rcNormalPosition, MONITOR_DEFAULTTONEAREST), &mi)) continue;
+        ClampInto(mi.rcWork, wp.rcNormalPosition);
+        wp.flags = 0;
+        if (IsIconic(a.hwnd))               wp.showCmd = SW_SHOWMINNOACTIVE;   // остаётся свёрнутым
+        else if (!IsWindowVisible(a.hwnd))  wp.showCmd = SW_HIDE;              // остаётся скрытым
+        else continue;                      // уже на экране — им займётся обычная синхронизация
+        SetWindowPlacement(a.hwnd, &wp);
     }
 }

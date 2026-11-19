@@ -23,10 +23,108 @@ void ShowOverview(AppState& app) {
     // Над каким окном колесо запустило зум — в лог, по разу на окно: если зум сработает
     // там, где должна быть прокрутка, по записи видно, что система отдала под курсором.
     HWND src = app.zoomSrc.exchange(nullptr, std::memory_order_relaxed);
-    if (src && src != app.zoomSrcLogged) {
-        app.zoomSrcLogged = src;
+    if (src && app.zoomSrcLogged.size() < 16 &&
+        std::find(app.zoomSrcLogged.begin(), app.zoomSrcLogged.end(), src) == app.zoomSrcLogged.end()) {
+        app.zoomSrcLogged.push_back(src);
         LogWindowChain(L"zoom started over", src);
     }
+    PrepareOvBackground(app);
+    app.ovLastZoom = -1;   // форсировать первую перерисовку
+    RegisterAllOvThumbs(app);
+    app.barP = 0; app.ovLastBarP = -1;
+    RegisterOvBars(app);   // панель задач — превью поверх окон, на своём месте
+    app.overview = true;   // с этого момента UpdateOverview работает
+    UpdateOverview(app);   // места превью — до показа окна: панель не должна мигнуть
+    // Окно во весь экран оболочка считает полноэкранным приложением: убирает панель
+    // задач и включает «Не беспокоить» — в трее появляется значок, значки сдвигаются.
+    // Под обзором этого не было видно, а в живом превью панели стало бы рывком в самом
+    // начале. NonRudeHWND говорит оболочке, что окно не полноэкранное приложение; поверх
+    // панели оно остаётся и так — оно «поверх всех» и поднято последним.
+    SetPropW(app.ov, L"NonRudeHWND", (HANDLE)(INT_PTR)1);
+    if (app.ovBack) SetPropW(app.ovBack, L"NonRudeHWND", (HANDLE)(INT_PTR)1);
+    SetWindowPos(app.ov, HWND_TOPMOST, app.vsX, app.vsY, app.vsW, app.vsH, SWP_NOACTIVATE);
+    ShowWindow(app.ov, SW_SHOWNA);
+    // Подложка — строго ПОД окном обзора и после него: появись она раньше, на кадр
+    // закрыла бы реальные окна обоями без превью. Сначала возвращаем ей «поверх всех»:
+    // плавная панорама держит оба окна в обычном слое.
+    if (app.ovLiveBg) {
+        SetWindowPos(app.ovBack, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        SetWindowPos(app.ovBack, app.ov, app.vsX, app.vsY, app.vsW, app.vsH, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
+    app.overview = true;
+}
+
+// ---------- Панели у края экрана ----------
+// Что считать панелью. Панель задач Windows — по классу окна. Но её вид и место меняют
+// моды (Windhawk: высота, положение сверху или сбоку, «плавающая» панель), а вместо неё
+// может стоять другая программа (YASB и подобные). Поэтому вторым признаком служит само
+// поведение: окно «поверх всех», лежащее в полосе у края монитора, которую рабочая
+// область не занимает, — так выглядит любая панель, зарезервировавшая себе место. Вид
+// панели знать не нужно вовсе: показывается живое превью настоящего окна.
+static bool IsEdgeBar(AppState& app, HWND h) {
+    if (h == app.ov || h == app.ovBack || h == app.hud || h == app.settings) return false;
+    if (!IsWindowVisible(h) || IsIconic(h)) return false;
+    int cloaked = 0;
+    if (SUCCEEDED(DwmGetWindowAttribute(h, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked) return false;
+    wchar_t cls[64] = {};
+    GetClassNameW(h, cls, 64);
+    if (!lstrcmpW(cls, L"Shell_TrayWnd") || !lstrcmpW(cls, L"Shell_SecondaryTrayWnd")) return true;
+    if (!(GetWindowLongW(h, GWL_EXSTYLE) & WS_EX_TOPMOST) || IsTracked(app, h)) return false;
+    RECT r;
+    if (!GetWindowRect(h, &r) || r.right - r.left < 8 || r.bottom - r.top < 8) return false;
+    MONITORINFO mi = { sizeof(mi) };
+    if (!GetMonitorInfoW(MonitorFromRect(&r, MONITOR_DEFAULTTONULL), &mi)) return false;
+    if (EqualRect(&mi.rcMonitor, &mi.rcWork)) return false;          // на этом мониторе ничего не зарезервировано
+    RECT inMon, inWork;
+    if (!IntersectRect(&inMon, &r, &mi.rcMonitor)) return false;
+    long long area = (long long)(inMon.right - inMon.left) * (inMon.bottom - inMon.top);
+    long long work = IntersectRect(&inWork, &r, &mi.rcWork)
+                   ? (long long)(inWork.right - inWork.left) * (inWork.bottom - inWork.top) : 0;
+    return work * 10 <= area;                                        // в рабочую область заходит не больше десятой части
+}
+
+static BOOL CALLBACK CollectBars(HWND h, LPARAM lp) {
+    if (IsEdgeBar(*g_app, h)) ((std::vector<HWND>*)lp)->push_back(h);
+    return TRUE;
+}
+
+// Превью панелей регистрируются ПОСЛЕ превью окон — значит, лежат поверх них, как и
+// настоящие панели. Размер приёмника равен размеру источника: превью пиксель в пиксель
+// совпадает с панелью, и на масштабе 1:1 подмена незаметна.
+void RegisterOvBars(AppState& app) {
+    app.ovBars.clear();
+    if (!app.ov) return;
+    std::vector<HWND> bars;
+    EnumWindows(CollectBars, (LPARAM)&bars);                         // сверху вниз
+    for (auto it = bars.rbegin(); it != bars.rend(); ++it) {
+        HWND h = *it;
+        OvBar b;
+        if (FAILED(DwmRegisterThumbnail(app.ov, h, b.thumb.put()))) continue;
+        RECT wr, vr;
+        SIZE src = {};
+        if (!GetWindowRect(h, &wr) || FAILED(DwmQueryThumbnailSourceSize(b.thumb, &src)) || src.cx < 1 || src.cy < 1) continue;
+        // Источник превью — либо окно целиком, либо его видимая рамка (без невидимых
+        // границ): привязываемся к тому прямоугольнику, чей размер совпал.
+        RECT r = wr;
+        if (SUCCEEDED(DwmGetWindowAttribute(h, DWMWA_EXTENDED_FRAME_BOUNDS, &vr, sizeof(vr))) &&
+            vr.right - vr.left == src.cx && vr.bottom - vr.top == src.cy) r = vr;
+        r.right = r.left + src.cx; r.bottom = r.top + src.cy;
+        MONITORINFO mi = { sizeof(mi) };
+        if (!GetMonitorInfoW(MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST), &mi)) continue;
+        const RECT& m = mi.rcMonitor;
+        // Уходит к ближайшему краю своего монитора: горизонтальная панель — вверх или
+        // вниз, вертикальная — влево или вправо.
+        b.dx = b.dy = 0;
+        if (src.cx >= src.cy) b.dy = ((r.top + r.bottom) / 2 < (m.top + m.bottom) / 2) ? -(r.bottom - m.top) : (m.bottom - r.top);
+        else                  b.dx = ((r.left + r.right) / 2 < (m.left + m.right) / 2) ? -(r.right - m.left) : (m.right - r.left);
+        b.dst  = { r.left - app.vsX, r.top - app.vsY, r.right - app.vsX, r.bottom - app.vsY };
+        b.clip = { m.left - app.vsX, m.top - app.vsY, m.right - app.vsX, m.bottom - app.vsY };
+        app.ovBars.push_back(std::move(b));
+    }
+}
+
+// Фон окна обзора — общий для зума и плавной панорамы.
+void PrepareOvBackground(AppState& app) {
     // Живые обои (Wallpaper Engine и т.п.): фон обзора — не снимок, а живое DWM-превью
     // окна-хоста, чтобы обои продолжали идти и в зуме. DWM-превью всегда рисуются поверх
     // содержимого своего окна, поэтому в одном окне порядок «обои → тени → окна» не
@@ -46,15 +144,6 @@ void ShowOverview(AppState& app) {
     // вернуться к обычным.
     if (!app.ovLiveBg && (host || app.wallLive || WallpaperFileChanged(app))) LoadWallpaper(app);
     app.lastWallCap = GetTickCount();
-    app.ovLastZoom = -1;   // форсировать первую перерисовку
-    RegisterAllOvThumbs(app);
-    SetWindowPos(app.ov, HWND_TOPMOST, app.vsX, app.vsY, app.vsW, app.vsH, SWP_NOACTIVATE);
-    ShowWindow(app.ov, SW_SHOWNA);
-    // Подложка — строго ПОД окном обзора и после него: появись она раньше, на кадр
-    // закрыла бы реальные окна обоями без превью.
-    if (app.ovLiveBg)
-        SetWindowPos(app.ovBack, app.ov, app.vsX, app.vsY, app.vsW, app.vsH, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    app.overview = true;
 }
 
 void HideOverview(AppState& app) {
@@ -64,7 +153,8 @@ void HideOverview(AppState& app) {
     // порядке на кадр мелькнули бы обои без окон.
     if (app.ovBack) ShowWindow(app.ovBack, SW_HIDE);
     ShowWindow(app.ov, SW_HIDE);
-    for (auto& w : app.wins) w.thumbOv.reset();   // ScopedThumbnail снимает регистрацию
+    for (auto& w : app.wins) { w.thumbOv.reset(); w.thumbShadow.reset(); }   // ScopedThumbnail снимает регистрацию
+    app.ovBars.clear();
     app.wallThumb.reset();
     app.ovLiveBg = false;
     app.overview = false;
@@ -87,7 +177,7 @@ void CommitZoomCam(AppState& app) {
 
 // Разложить превью окон по обзору согласно текущему масштабу/якорю.
 void UpdateOverview(AppState& app) {
-    if (!app.overview) return;
+    if (!app.overview && !app.glide) return;
     for (auto& w : app.wins) {
         if (!w.thumbOv) continue;
         RECT vw = VisWorld(w);
@@ -103,6 +193,44 @@ void UpdateOverview(AppState& app) {
         p.fVisible = off ? FALSE : TRUE;
         p.rcDestination = d;
         DwmUpdateThumbnailProperties(w.thumbOv, &p);
+        if (w.thumbShadow) {
+            // Тень — та же рамка, расширенная на поля тени; масштабируется вместе с окном.
+            RECT sd = { (LONG)llround(OvClientX(app, vw.left - w.shadowPad.left)),
+                        (LONG)llround(OvClientY(app, vw.top - w.shadowPad.top)),
+                        (LONG)llround(OvClientX(app, vw.right + w.shadowPad.right)),
+                        (LONG)llround(OvClientY(app, vw.bottom + w.shadowPad.bottom)) };
+            bool soff = (sd.right <= sd.left || sd.bottom <= sd.top ||
+                         sd.right < 0 || sd.left > app.vsW || sd.bottom < 0 || sd.top > app.vsH);
+            DWM_THUMBNAIL_PROPERTIES sp = {};
+            sp.dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY | DWM_TNP_SOURCECLIENTAREAONLY;
+            sp.opacity = 255;
+            sp.fSourceClientAreaOnly = FALSE;
+            sp.fVisible = soff ? FALSE : TRUE;
+            sp.rcDestination = sd;
+            DwmUpdateThumbnailProperties(w.thumbShadow, &sp);
+        }
+    }
+    // Панели у края экрана: уезжают за край и растворяются по мере barP.
+    for (auto& b : app.ovBars) {
+        const double p = app.barP;
+        LONG ox = (LONG)lround(b.dx * p), oy = (LONG)lround(b.dy * p);
+        RECT moved = { b.dst.left + ox, b.dst.top + oy, b.dst.right + ox, b.dst.bottom + oy }, vis;
+        DWM_THUMBNAIL_PROPERTIES tp = {};
+        if (p >= 0.999 || !IntersectRect(&vis, &moved, &b.clip)) {
+            tp.dwFlags = DWM_TNP_VISIBLE;
+            tp.fVisible = FALSE;
+        } else {
+            // Часть, выехавшую за монитор, отрезаем и у приёмника, и у источника — превью
+            // «уходит под край», а не въезжает на соседний монитор.
+            tp.dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_RECTSOURCE | DWM_TNP_VISIBLE |
+                         DWM_TNP_OPACITY | DWM_TNP_SOURCECLIENTAREAONLY;
+            tp.rcDestination = vis;
+            tp.rcSource = { vis.left - moved.left, vis.top - moved.top, vis.right - moved.left, vis.bottom - moved.top };
+            tp.opacity = (BYTE)(255.0 * (1.0 - p) + 0.5);
+            tp.fVisible = TRUE;
+            tp.fSourceClientAreaOnly = FALSE;
+        }
+        DwmUpdateThumbnailProperties(b.thumb, &tp);
     }
     // Живой фон: затемнение — непрозрачностью превью над чёрной подложкой.
     if (app.ovLiveBg && app.wallThumb) {
@@ -294,19 +422,6 @@ void WallLog(const wchar_t* fmt, ...) {
 // ---------- Диагностика устройства рабочего стола ----------
 // Раскладка окон стола различается между сборками Windows и меняется программами обоев
 // и модами оболочки, а воспроизвести чужую систему нельзя — поэтому пишем её в wall.log.
-static std::wstring ExeName(DWORD pid) {
-    std::wstring name = L"?";
-    HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (!p) return name;
-    wchar_t buf[MAX_PATH]; DWORD n = MAX_PATH;
-    if (QueryFullProcessImageNameW(p, 0, buf, &n)) {
-        const wchar_t* slash = wcsrchr(buf, L'\\');
-        name = slash ? slash + 1 : buf;
-    }
-    CloseHandle(p);
-    return name;
-}
-
 struct TreeCtx { std::wstring text; DWORD hostPid; int count; };
 static BOOL CALLBACK TreeChildProc(HWND c, LPARAM lp) {
     TreeCtx* x = (TreeCtx*)lp;
@@ -344,6 +459,7 @@ static BOOL CALLBACK TreeTopProc(HWND h, LPARAM lp) {
 void LogDesktopTree(const wchar_t* why) {
     DWORD pid = 0;
     HWND shell = GetShellWindow();
+    if (!shell) shell = FindWindowW(L"Progman", nullptr);   // Explorer перезапускается
     if (shell) GetWindowThreadProcessId(shell, &pid);
     WallLog(L"desktop tree (%s), shell %p:", why, shell);
     EnumWindows(TreeTopProc, (LPARAM)&pid);
@@ -566,18 +682,15 @@ static BOOL CALLBACK WallMonProc(HMONITOR hm, HDC, LPRECT, LPARAM lp) {
     return TRUE;
 }
 
-// Мягкая тень под окно: несколько расширяющихся скруглённых слоёв чёрного с малой
-// альфой, накапливающихся в градиент (как тень окна Windows). Превью ложится сверху.
-// Геометрия та же, что была в GDI-версии (CreateRoundRectRgn задаёт ДИАМЕТР скругления,
-// отсюда /2 для радиуса D2D).
-static void DrawShadow(AppState& app, const RECT& r, int radius) {
-    for (int i = 7; i >= 1; --i) {
-        float dy = (float)(i / 2 + 1);
-        float rad = (radius + i) / 2.0f;
-        D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(
-            D2D1::RectF((float)(r.left - i), (float)(r.top - i) + dy,
-                        (float)(r.right + i), (float)(r.bottom + i) + dy), rad, rad);
-        app.ovRT->FillRoundedRectangle(rr, app.ovShadowBrush.Get());
+// Тень окна средствами Direct2D: вложенные контуры равного затемнения по профилю,
+// снятому с настоящей тени Windows (id_shadow.cpp). scale — пикселей слоя на пиксель
+// профиля (масштаб обзора × масштаб монитора окна).
+static void DrawNativeShadow(AppState& app, const RECT& r, bool active, bool dark, float scale, float corner) {
+    for (const ShadowLayer& l : ShadowLayers(active, dark)) {
+        D2D1_RECT_F q = { r.left - l.dl * scale, r.top - l.dt * scale, r.right + l.dr * scale, r.bottom + l.db * scale };
+        float rx = corner + l.dl * scale, ry = corner + (l.dt + l.db) * 0.5f * scale;
+        app.ovShadowBrush->SetColor(D2D1::ColorF(0.0f, 0.0f, 0.0f, l.alpha));
+        app.ovRT->FillRoundedRectangle(D2D1::RoundedRect(q, rx, ry), app.ovShadowBrush.Get());
     }
 }
 
@@ -606,24 +719,58 @@ void RenderOverview(AppState& app, HWND hwnd) {
         }
     }
 
-    // Тени под окна (без рамок) — превью с закруглениями Win11 лягут поверх.
-    int radius = (int)(8.0 * app.zoom + 0.5);
-    if (radius < 2) radius = 2;
+    // Тени окон. Основной путь — тень-превью под превью окна (id_shadow.cpp): она падает
+    // и на соседние окна. Здесь рисуется то, чего превью дать не может:
+    //  - живые обои: окно обзора прозрачно, а полупрозрачное превью на прозрачном месте
+    //    система не показывает — тень на обоях пропадала бы целиком. Рисуем её сами, по
+    //    тому же профилю; под превью окон она скрыта, так что с тенью-превью не двоится;
+    //  - зум: окно без системной тени (развёрнутое и т.п.) — чтобы не сливалось с фоном.
+    HWND fgWin = GetForegroundWindow();
     for (auto& w : app.wins) {
         RECT vw = VisWorld(w);
         RECT d = { (LONG)llround(OvClientX(app, vw.left)),  (LONG)llround(OvClientY(app, vw.top)),
                    (LONG)llround(OvClientX(app, vw.right)), (LONG)llround(OvClientY(app, vw.bottom)) };
         if (d.right <= d.left || d.bottom <= d.top) continue;
         // Окно целиком за пределами обзора (с запасом на размах тени) — не рисуем.
-        if (d.right < -16 || d.left > rc.right + 16 || d.bottom < -16 || d.top > rc.bottom + 16) continue;
-        DrawShadow(app, d, radius);
+        if (d.right < -100 || d.left > rc.right + 100 || d.bottom < -100 || d.top > rc.bottom + 100) continue;
+        if (app.glide && w.glideReal) continue;   // настоящее окно поверх слоя — у него своя тень
+        const bool native = (bool)w.shadowSrc;    // у окна есть системная тень (см. EnsureShadow)
+        if (w.thumbShadow && !app.ovLiveBg) continue;   // тень показывает превью
+        if (app.glide && !native) continue;       // 1:1: у окна без системной тени её нет и на столе
+        float sc = (float)app.zoom * (w.shadowDpi ? w.shadowDpi / 96.0f : 1.0f);
+        DrawNativeShadow(app, d, native ? w.shadowActive : (w.hwnd == fgWin), native && w.shadowDark, sc, 8.0f * sc);
+    }
+    // Живые обои: нарисованная здесь тень нужна только НАД ОБОЯМИ. Под превью окон её
+    // быть не должно: на окна ниже тень кладёт тень-превью, а сквозь полупрозрачное окно
+    // (акриловый фон и т.п.) нарисованная тень просвечивала бы и давала двойное затемнение.
+    // Стираем её в пределах рамки каждого окна — крестом из двух прямоугольников, чтобы
+    // уголки рамки остались: за скруглёнными углами окна тень видна.
+    if (app.ovLiveBg) {
+        for (auto& w : app.wins) {
+            if (!w.thumbOv) continue;
+            RECT vw = VisWorld(w);
+            float l = (float)OvClientX(app, vw.left), t = (float)OvClientY(app, vw.top);
+            float r = (float)OvClientX(app, vw.right), b = (float)OvClientY(app, vw.bottom);
+            float c = 8.0f * (float)app.zoom * (w.shadowDpi ? w.shadowDpi / 96.0f : 1.0f);
+            if (r - l <= 2 * c || b - t <= 2 * c) continue;
+            const D2D1_RECT_F cross[2] = { { l + c, t, r - c, b }, { l, t + c, r, b - c } };
+            for (const D2D1_RECT_F& q : cross) {
+                rt->PushAxisAlignedClip(q, D2D1_ANTIALIAS_MODE_ALIASED);
+                rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+                rt->PopAxisAlignedClip();
+            }
+        }
     }
 
-    if (app.ovTextFormat && app.ovTextBrush) {
+    if (!app.glide && app.ovTextFormat && app.ovTextBrush) {   // в плавной панораме подписи нет
         wchar_t info[256];
         wsprintfW(info, Tr(S_OV_HINT_FMT), (int)(app.zoom * 100));
+        // Подпись — в масштабе интерфейса (как миникарта): на 200 % иначе вдвое мельче.
+        const float s = app.uiScale;
+        rt->SetTransform(D2D1::Matrix3x2F::Scale(s, s));
         rt->DrawText(info, (UINT32)lstrlenW(info), app.ovTextFormat.Get(),
-                     D2D1::RectF(24.0f, 20.0f, (float)rc.right, 60.0f), app.ovTextBrush.Get());
+                     D2D1::RectF(24.0f, 20.0f, (float)rc.right / s, 60.0f), app.ovTextBrush.Get());
+        rt->SetTransform(D2D1::Matrix3x2F::Identity());
     }
 
     HRESULT hr = rt->EndDraw();
@@ -711,11 +858,25 @@ static void ClickIntoWindow(AppState& app, HWND h, double cx, double cy, bool ri
     PumpFor(30);   // маршрутизация инжектированного ввода асинхронна — даём ей пройти
     SetWindowRgn(app.ov, nullptr, FALSE);      // вернуть целое окно
     if (zoomed) SetCursorPos(savedCur.x, savedCur.y);
-    else        SetWindowPos(h, nullptr, cur.left, cur.top, 0, 0, F | SWP_NOZORDER);
+    // Клик мог изменить само окно: «Развернуть», «Свернуть», «Закрыть». Развёрнутое или
+    // свёрнутое окно на прежнее место не двигаем — сдвинули бы его с монитора.
+    else if (IsWindow(h) && !IsZoomed(h) && !IsIconic(h))
+        SetWindowPos(h, nullptr, cur.left, cur.top, 0, 0, F | SWP_NOZORDER);
 }
 
 LRESULT CALLBACK OvProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     AppState& app = *g_app;
+    // Плавная панорама: слой живёт доли секунды и только показывает — клики обзора
+    // (нажать окно, вернуться в 1:1) на нём не работают, курсор обычный.
+    if (app.glide) {
+        switch (msg) {
+        case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_MOUSEMOVE:
+            return 0;
+        case WM_SETCURSOR:
+            SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+            return TRUE;
+        }
+    }
     switch (msg) {
     case WM_ERASEBKGND:
         return 1;
@@ -734,7 +895,15 @@ LRESULT CALLBACK OvProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         double cx = (short)LOWORD(lp), cy = (short)HIWORD(lp);
         app.ovDragHwnd = OvHitTest(app, cx, cy);   // окно под курсором или nullptr — фон
         app.ovDragLast.x = (LONG)cx; app.ovDragLast.y = (LONG)cy;
+        app.ovDownPt = app.ovDragLast;
         app.ovDragMoved = false;
+        // Точка захвата: за какое место окна его взяли (в мировых координатах). Дальше
+        // окно ставится так, чтобы это место оставалось под курсором.
+        for (auto& w : app.wins) if (w.hwnd == app.ovDragHwnd) {
+            app.ovGrabX = OvWorldX(app, cx) - w.world.left;
+            app.ovGrabY = OvWorldY(app, cy) - w.world.top;
+            break;
+        }
         SetCapture(hwnd);
         return 0;
     }
@@ -742,14 +911,20 @@ LRESULT CALLBACK OvProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (GetCapture() != hwnd) return 0;
         double cx = (short)LOWORD(lp), cy = (short)HIWORD(lp);
         double ddx = cx - app.ovDragLast.x, ddy = cy - app.ovDragLast.y;
-        if (!app.ovDragMoved && (fabs(ddx) > 3 || fabs(ddy) > 3)) app.ovDragMoved = true;
+        // Порог — от места нажатия, а не от прошлого события: иначе медленное
+        // перетаскивание (шаги по 1–2 px) не начиналось вовсе и при отпускании
+        // превращалось в клик по окну.
+        if (!app.ovDragMoved && (fabs(cx - app.ovDownPt.x) > 3 || fabs(cy - app.ovDownPt.y) > 3)) app.ovDragMoved = true;
         if (app.ovDragMoved) {
             if (app.ovDragHwnd) {
-                // двигаем окно: мировой сдвиг = клиентский / масштаб
-                LONG wdx = (LONG)llround(ddx / app.zoom), wdy = (LONG)llround(ddy / app.zoom);
+                // Окно ведём по абсолютному положению курсора: точка захвата остаётся под
+                // ним. Раньше складывались округлённые сдвиги каждого события — остатки
+                // терялись, и окно расходилось с курсором на несколько пикселей.
                 for (auto& w : app.wins) if (w.hwnd == app.ovDragHwnd) {
-                    w.world.left += wdx; w.world.right += wdx;
-                    w.world.top  += wdy; w.world.bottom += wdy;
+                    LONG ww = w.world.right - w.world.left, wh = w.world.bottom - w.world.top;
+                    LONG nl = (LONG)llround(OvWorldX(app, cx) - app.ovGrabX);
+                    LONG nt = (LONG)llround(OvWorldY(app, cy) - app.ovGrabY);
+                    w.world = { nl, nt, nl + ww, nt + wh };
                     break;
                 }
             } else {
@@ -764,6 +939,9 @@ LRESULT CALLBACK OvProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         HWND hit = app.ovDragHwnd;                 // окно, на котором нажали (или nullptr — фон)
         if (GetCapture() == hwnd) ReleaseCapture();
         app.ovDragHwnd = nullptr; app.ovDragMoved = false;
+        // Последнее движение могло прийти вместе с отпусканием, уже после кадра: без
+        // перерисовки окно «доезжало» бы эти пиксели позже, при следующем изменении.
+        app.ovLastZoom = -1;
         if (!moved) {
             double cx = (short)LOWORD(lp), cy = (short)HIWORD(lp);
             if (hit) {

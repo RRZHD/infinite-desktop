@@ -87,12 +87,15 @@ D2D1_COLOR_F ToD2D(COLORREF c, float a) {
 // Render target окна + одна кисть (цвет задаётся перед каждой заливкой). Создаётся
 // лениво, подгоняется под размер клиента; после потери устройства владелец сбрасывает
 // обе ComPtr и мы создаём заново.
-bool EnsureUiTarget(AppState& app, HWND hwnd, ComPtr<ID2D1HwndRenderTarget>& rt, ComPtr<ID2D1SolidColorBrush>& br) {
+// scale — масштаб интерфейса по DPI монитора: рисуем в логических пикселях (96 DPI), а
+// Direct2D сам растягивает геометрию и текст до физических.
+bool EnsureUiTarget(AppState& app, HWND hwnd, ComPtr<ID2D1HwndRenderTarget>& rt, ComPtr<ID2D1SolidColorBrush>& br, float scale) {
     RECT rc; GetClientRect(hwnd, &rc);
     D2D1_SIZE_U sz = D2D1::SizeU((UINT32)max(1L, rc.right), (UINT32)max(1L, rc.bottom));
     if (rt) {
         D2D1_SIZE_U have = rt->GetPixelSize();
         if (have.width != sz.width || have.height != sz.height) rt->Resize(sz);
+        rt->SetDpi(96.0f * scale, 96.0f * scale);
         return br != nullptr;
     }
     if (!app.d2dFactory) return false;
@@ -101,6 +104,7 @@ bool EnsureUiTarget(AppState& app, HWND hwnd, ComPtr<ID2D1HwndRenderTarget>& rt,
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), 96.0f, 96.0f);
     D2D1_HWND_RENDER_TARGET_PROPERTIES hp = D2D1::HwndRenderTargetProperties(hwnd, sz, D2D1_PRESENT_OPTIONS_NONE);
     if (FAILED(app.d2dFactory->CreateHwndRenderTarget(rp, hp, rt.GetAddressOf()))) return false;
+    rt->SetDpi(96.0f * scale, 96.0f * scale);
     rt->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), br.GetAddressOf());
     return br != nullptr;
 }

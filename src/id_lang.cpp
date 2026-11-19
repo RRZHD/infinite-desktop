@@ -31,6 +31,8 @@ static const StrRow STRINGS[] = {
     /* S_ERR_NEED_DIGIT  */ { L"Для мест: модификаторы + цифра (1…9 или Num 1…9)",
                               L"Places need modifiers + a digit (1…9 or Num 1…9)" },
     /* S_ERR_TAKEN       */ { L" уже занято: ",        L" is already used by: " },
+    /* S_ERR_SYSTEM_TAKEN*/ { L" занято другой программой — не работает",
+                              L" is taken by another program and will not work" },
     // окно настроек
     /* S_SEC_HOTKEYS     */ { L"Горячие клавиши",      L"Hotkeys" },
     /* S_SEC_MARKS       */ { L"Закладки камеры",      L"Canvas bookmarks" },
@@ -40,6 +42,8 @@ static const StrRow STRINGS[] = {
                               L"Middle button moves canvas in any window" },
     /* S_OPT_MAXMOVE     */ { L"Развёрнутые окна двигаются с холстом",
                               L"Maximized windows move with the canvas" },
+    /* S_OPT_GLIDE       */ { L"Плавная панорама (окна встают на места в конце)",
+                              L"Smooth panning (windows settle when it ends)" },
     /* S_RESET           */ { L"Сбросить по умолчанию", L"Reset to defaults" },
     /* S_SETTINGS_TITLE  */ { L"Настройки",            L"Settings" },
     /* S_SETTINGS_HINT   */ { L"Клик по сочетанию — нажмите новое · Esc — отмена",

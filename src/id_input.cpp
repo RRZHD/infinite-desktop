@@ -3,24 +3,11 @@
 
 #include "id_common.h"
 
-// ---------- Зум колесом (вход в обзор) ----------
+// ---------- Что под курсором ----------
 static bool ClassIs(HWND h, const wchar_t* a, const wchar_t* b) {
     wchar_t cls[64] = {};
     GetClassNameW(h, cls, 64);
     return !lstrcmpW(cls, a) || !lstrcmpW(cls, b);
-}
-
-// Окно верхнего уровня — рабочий стол оболочки: Progman либо WorkerW того же процесса
-// (слои стола на Windows 10 и ранних сборках 11). WorkerW — общее имя класса, такие окна
-// создают и другие программы, поэтому сверяем процесс с окном оболочки.
-static bool IsDesktopRoot(HWND root) {
-    if (!ClassIs(root, L"WorkerW", L"Progman")) return false;
-    HWND shell = GetShellWindow();
-    if (!shell) return true;                  // нестандартная оболочка — верим классу
-    DWORD a = 0, b = 0;
-    GetWindowThreadProcessId(root, &a);
-    GetWindowThreadProcessId(shell, &b);
-    return a == b;
 }
 
 // Под курсором — рабочий стол? Решает КОРЕНЬ окна, а не его собственный класс: столом
@@ -35,8 +22,7 @@ static bool IsDesktopRoot(HWND root) {
 static bool IsDesktopClass(AppState& app, HWND h) {
     if (!h) return false;                     // окна нет — ввод не наш
     if (h == app.ov) return true;
-    HWND root = GetAncestor(h, GA_ROOT);
-    return root && IsDesktopRoot(root);
+    return IsShellDesktopWindow(GetAncestor(h, GA_ROOT));
 }
 
 // Под курсором — панель задач (основная или на втором мониторе)?
@@ -45,6 +31,7 @@ static bool IsTaskbar(HWND h) {
     return root && ClassIs(root, L"Shell_TrayWnd", L"Shell_SecondaryTrayWnd");
 }
 
+// ---------- Зум и панорама колесом (главный поток) ----------
 // Меняет масштаб в `factor` раз с привязкой к точке pt (экранные координаты).
 static void DoZoomFactor(AppState& app, double factor, POINT pt) {
     double cx = pt.x - app.vsX;       // клиентские координаты окна обзора
@@ -65,12 +52,6 @@ static void DoZoomFactor(AppState& app, double factor, POINT pt) {
     app.axWY = wy; app.axCY = cy;
 }
 
-// Тик колеса: один шаг зума к/от курсора.
-static void DoZoom(AppState& app, int delta, POINT pt) {
-    double ticks = (double)delta / (double)WHEEL_DELTA;
-    DoZoomFactor(app, pow(ZOOM_STEP, ticks), pt);
-}
-
 // Панорама холста двухпальцевым скроллом (delta колеса/гориз.колеса).
 // Холст следует за пальцами; вертикаль и горизонталь — независимо.
 static void PanWheel(AppState& app, double dxDelta, double dyDelta) {
@@ -81,6 +62,34 @@ static void PanWheel(AppState& app, double dxDelta, double dyDelta) {
         app.targetX += dxDelta * TP_WHEEL;  // плавно через easing
         app.targetY -= dyDelta * TP_WHEEL;
     }
+}
+
+// Hook-поток только копит дельты (atomics), а масштаб, якорь зума и цель камеры меняет
+// главный поток — здесь, в начале кадра. Раньше их правил сам hook-поток, пока главный
+// читал и менял те же поля в кадре: кадр мог выйти с наполовину обновлённым якорем.
+bool WheelInputPending(const AppState& app) {
+    return app.wheelZoom.load(std::memory_order_relaxed) != 0 ||
+           app.wheelPanX.load(std::memory_order_relaxed) != 0 ||
+           app.wheelPanY.load(std::memory_order_relaxed) != 0;
+}
+
+void ApplyWheelInput(AppState& app) {
+    long z = app.wheelZoom.exchange(0, std::memory_order_acq_rel);
+    if (z) {
+        long long packed = app.wheelZoomPt.load(std::memory_order_acquire);
+        POINT pt = { (LONG)(packed >> 32), (LONG)(int)(packed & 0xFFFFFFFFLL) };
+        // Несколько шагов колеса между кадрами складываются в один множитель.
+        DoZoomFactor(app, pow(ZOOM_STEP, (double)z / (double)WHEEL_DELTA), pt);
+    }
+    long px = app.wheelPanX.exchange(0, std::memory_order_acq_rel);
+    long py = app.wheelPanY.exchange(0, std::memory_order_acq_rel);
+    if (px || py) PanWheel(app, (double)px, (double)py);
+}
+
+// Разбудить главный поток: в покое он спит до следующего сообщения, а атомарная запись
+// его не будит — без этого реакция на колесо и СКМ запаздывала бы на период покоя.
+static void WakeMain(AppState& app) {
+    if (app.hud) PostMessageW(app.hud, WM_NULL, 0, 0);
 }
 
 // ---------- Глобальный hook СКМ/колеса ----------
@@ -103,6 +112,7 @@ LRESULT CALLBACK MouseProc(int code, WPARAM wp, LPARAM lp) {
                 app.dragDeltaY.store(0, std::memory_order_relaxed);
                 app.dragging.store(true, std::memory_order_release);
                 app.lastMouse = m->pt;
+                WakeMain(app);
                 return 1;             // поглощаем только когда сами панорамим
             }
             break;                    // иначе СКМ — в приложение
@@ -121,22 +131,31 @@ LRESULT CALLBACK MouseProc(int code, WPARAM wp, LPARAM lp) {
             if (app.dragging.load(std::memory_order_acquire)) return 1;   // во время панорамы СКМ колесо не зумит
             int delta = (short)HIWORD(m->mouseData);
             bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-            HWND under = app.overview ? nullptr : WindowFromPoint(m->pt);
-            bool onDesk = app.overview || IsDesktopClass(app, under);
+            bool inOverview = app.overview;
+            HWND under = inOverview ? nullptr : WindowFromPoint(m->pt);
+            bool onDesk = inOverview || IsDesktopClass(app, under);
             if (!onDesk) break;                              // внутри приложения — обычная прокрутка
             // Колесо мыши отправляет >= WHEEL_DELTA на клик. Мелкая дельта тачпада — панорама.
             bool mouseWheel = (abs(delta) >= WHEEL_DELTA);
             if (ctrl || mouseWheel) {                        // зум
                 if (under) app.zoomSrc.store(under, std::memory_order_relaxed);   // для wall.log
-                DoZoom(app, delta, m->pt);
-                return 1;
+                long long packed = ((long long)m->pt.x << 32) | (unsigned int)m->pt.y;
+                app.wheelZoomPt.store(packed, std::memory_order_release);
+                app.wheelZoom.fetch_add(delta, std::memory_order_acq_rel);
+            } else {
+                app.wheelPanY.fetch_add(delta, std::memory_order_relaxed);   // 2 пальца верт. => панорама
             }
-            PanWheel(app, 0.0, (double)delta); return 1;          // 2 пальца верт. => панорама
+            WakeMain(app);
+            return 1;
         }
         case WM_MOUSEHWHEEL: {
             if (app.dragging.load(std::memory_order_acquire)) return 1;   // во время панорамы СКМ колесо не зумит
             bool onDesk = app.overview || IsDesktopClass(app, WindowFromPoint(m->pt));
-            if (onDesk) { PanWheel(app, (double)(short)HIWORD(m->mouseData), 0.0); return 1; }  // 2 пальца гориз.
+            if (onDesk) {                                                 // 2 пальца гориз.
+                app.wheelPanX.fetch_add((short)HIWORD(m->mouseData), std::memory_order_relaxed);
+                WakeMain(app);
+                return 1;
+            }
             break;
         }
         case WM_MBUTTONUP:
@@ -149,6 +168,3 @@ LRESULT CALLBACK MouseProc(int code, WPARAM wp, LPARAM lp) {
     }
     return CallNextHookEx(app.mouseHook, code, wp, lp);
 }
-
-
-

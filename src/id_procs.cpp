@@ -7,6 +7,11 @@
 LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     AppState& app = *g_app;
     if (msg == WM_TRAY) { OnTrayMessage(app, wp, lp); return 0; }
+    if (msg == WM_SHOWSETTINGS) {   // программу запустили второй раз — показываем, что она уже работает
+        if (app.settings && !IsWindowVisible(app.settings)) OpenSettings(app);
+        else if (app.settings) SetForegroundWindow(app.settings);
+        return 0;
+    }
     if (app.taskbarCreatedMsg && msg == app.taskbarCreatedMsg) {   // Explorer перезапустился
         app.trayAdded = false; AddTrayIcon(app); return 0;
     }
@@ -28,7 +33,7 @@ LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONDOWN: {
         RECT rc; GetClientRect(hwnd, &rc);
         int mx = (short)LOWORD(lp), my = (short)HIWORD(lp);
-        RECT gr = GearRect(rc);
+        RECT gr = GearRect(app, rc);
         if (mx >= gr.left && mx <= gr.right && my >= gr.top && my <= gr.bottom) {
             OpenSettings(app);   // клик по шестерёнке — настройки клавиш
             return 0;
@@ -58,9 +63,36 @@ LRESULT CALLBACK HudProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         PlaceHud(app);                             // миникарта — в свой угол новой раскладки
         if (app.ov) SetWindowPos(app.ov, HWND_TOPMOST, app.vsX, app.vsY, app.vsW, app.vsH,
                                SWP_NOACTIVATE | (app.overview ? 0 : SWP_NOREDRAW));
+        // Места парковки считались от прежних границ экрана: окно, стоявшее за старым
+        // краем, могло оказаться на новом мониторе или вне всех. Пересчитываем все.
+        for (auto& w : app.wins) w.parkedOff = false;
+        if (!app.overview) RepositionAll(app);   // в обзоре окна встанут на места при выходе
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     }
+    case WM_DPICHANGED:
+        PlaceHud(app);                             // новый масштаб — новый размер миникарты
+        return 0;
+    // Windows завершает сеанс (выключение, перезагрузка, выход из системы). Процесс после
+    // этого просто снимут, до кода после цикла сообщений дело не дойдёт — а для программы
+    // в трее это и есть обычный конец работы. Раскладку сохраняем уже на запросе: дальше
+    // система закрывает окна по одному, и автосохранение записало бы пустеющий стол.
+    case WM_QUERYENDSESSION:
+        if (!app.sessionEnding) {
+            app.sessionEnding = true;
+            if (!app.overview) SyncWorldFromScreen(app);
+            SaveLayout(app);
+        }
+        return TRUE;
+    case WM_ENDSESSION:
+        if (wp) {                                  // сеанс действительно завершается
+            RestoreSnap(app);
+            RestoreDesktopIcons(app);
+            EndSession();
+        } else {
+            app.sessionEnding = false;             // завершение отменили — работаем дальше
+        }
+        return 0;
     case WM_SETTINGCHANGE:
         if (lp && !lstrcmpW((LPCWSTR)lp, L"Control Panel\\Desktop")) LoadWallpaper(app);
         if (lp && !lstrcmpW((LPCWSTR)lp, L"ImmersiveColorSet")) OnThemeChanged(app);   // светлая/тёмная, акцент
@@ -179,6 +211,16 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd,
 
     if (event != EVENT_SYSTEM_FOREGROUND) return;
     if (app.overview) return;   // в режиме обзора зум не трогаем
+    GlideRestack(app);          // плавная панорама: активированное окно система подняла над слоем превью
+    app.pendingFocus = nullptr;
+    // Окна ещё нет в списке (только что открыто или развёрнуто из свёрнутого) — берём
+    // сразу, не дожидаясь фоновой синхронизации. Не взялось (ещё разворачивается) —
+    // запоминаем: подъедем, когда синхронизация его добавит.
+    if (!IsTracked(app, hwnd)) {
+        app.pendingFocus = hwnd;
+        AddNewWindows(app);     // добавив это окно, сам подъедет и сбросит pendingFocus
+        return;
+    }
     for (auto& w : app.wins) {
         if (w.hwnd != hwnd) continue;
         LONG cx = (LONG)llround(app.camX), cy = (LONG)llround(app.camY);
@@ -212,16 +254,19 @@ void RestoreSnap(AppState& app) {
 // Иконки рабочего стола рисует окно SHELLDLL_DefView (дочернее у Progman/WorkerW).
 // Скрываем их на время работы и возвращаем при выходе.
 
+// Ищем только внутри окон рабочего стола оболочки. SHELLDLL_DefView есть и в окнах
+// Проводника, и в диалогах выбора файла старого типа (там он — прямой потомок диалога):
+// поиск по одному классу мог спрятать список файлов в таком диалоге вместо иконок стола.
 static BOOL CALLBACK FindDefViewProc(HWND top, LPARAM lp) {
+    if (!IsShellDesktopWindow(top)) return TRUE;
     HWND def = FindWindowExW(top, nullptr, L"SHELLDLL_DefView", nullptr);
     if (def) { *(HWND*)lp = def; return FALSE; }
     return TRUE;
 }
 
 static HWND FindDesktopIcons() {
-    HWND progman = FindWindowW(L"Progman", nullptr);
-    HWND def = progman ? FindWindowExW(progman, nullptr, L"SHELLDLL_DefView", nullptr) : nullptr;
-    if (!def) EnumWindows(FindDefViewProc, (LPARAM)&def);  // иногда внутри WorkerW
+    HWND def = nullptr;
+    EnumWindows(FindDefViewProc, (LPARAM)&def);   // Progman либо отдельный слой WorkerW
     return def;
 }
 
@@ -246,6 +291,7 @@ static HWND IconsLayerOf(HWND def) {
     HWND top = GetAncestor(def, GA_ROOT);
     wchar_t cls[32] = {};
     if (!top || top == def || !GetClassNameW(top, cls, 32) || lstrcmpW(cls, L"WorkerW")) return nullptr;
+    if (!IsShellDesktopWindow(top)) return nullptr;      // чужой WorkerW — не слой рабочего стола
     LayerCtx x = { def, false };
     EnumChildWindows(top, LayerChildProc, (LPARAM)&x);   // в слое есть что-то ещё (обои?) — не трогаем
     return x.other ? nullptr : top;
@@ -255,39 +301,95 @@ static HWND IconsLayerOf(HWND def) {
 // фоновой синхронизации: окно иконок пересоздаётся при перезапуске Explorer (сбой,
 // обновление, моды оболочки), а при запуске программы живых обоев оболочка переносит его
 // в новый слой и показывает тот заново. В обычной ситуации это несколько дешёвых проверок.
-void RecheckDesktopIcons(AppState& app) {
+// Окна принадлежат Explorer, поэтому ShowWindowAsync: синхронный ShowWindow ждал бы его
+// поток, и если тот занят или завис (как раз при перезапуске), встал бы наш цикл кадров.
+void HideDesktopIcons(AppState& app) {
     bool fresh = false;
     if (!app.iconsWin || !IsWindow(app.iconsWin)) {
         app.iconsWin = FindDesktopIcons();
         app.iconsWereVisible = false;
-        app.iconsLayer = nullptr;
         if (!app.iconsWin) return;
         fresh = true;
+        app.sessionDirty = true;
     }
     // Собственный флаг видимости, а не IsWindowVisible: та вернёт FALSE и для видимого
     // окна внутри скрытого слоя.
     if (GetWindowLongW(app.iconsWin, GWL_STYLE) & WS_VISIBLE) {
+        if (!app.iconsWereVisible) app.sessionDirty = true;
         app.iconsWereVisible = true;
-        ShowWindow(app.iconsWin, SW_HIDE);
+        ShowWindowAsync(app.iconsWin, SW_HIDE);
     }
     HWND layer = IconsLayerOf(app.iconsWin);
     bool layerChanged = (layer != app.iconsLayer);
-    if (layer && IsWindowVisible(layer)) ShowWindow(layer, SW_HIDE);
-    app.iconsLayer = layer;
-    if (fresh || layerChanged)
+    if (layerChanged) {
+        // Прежний слой перестал быть «слоем одних иконок» (в нём появилось чужое окно —
+        // например, обои — или иконки переехали). Скрытым его оставлять нельзя: вместе с
+        // ним пропало бы и то, что в нём теперь лежит. Скрывали мы — мы и возвращаем.
+        if (app.iconsLayerOurs && app.iconsLayer && IsWindow(app.iconsLayer))
+            ShowWindowAsync(app.iconsLayer, SW_SHOWNA);
+        app.iconsLayer = layer;
+        app.iconsLayerOurs = false;
+        app.sessionDirty = true;
+    }
+    if (layer && IsWindowVisible(layer)) {
+        ShowWindowAsync(layer, SW_HIDE);
+        if (!app.iconsLayerOurs) app.sessionDirty = true;
+        app.iconsLayerOurs = true;    // «наш» — только если скрыли сами, а не застали скрытым
+    }
+    static int logged = 0;            // раскладка стола — в лог, но не бесконечно
+    if ((fresh || layerChanged) && logged < 20) {
+        ++logged;
         LogDesktopTree(layer ? L"icons hidden with their layer" : L"icons hidden");
-}
-
-void HideDesktopIcons(AppState& app) {
-    RecheckDesktopIcons(app);
+    }
 }
 
 // Сначала иконки (пока слой скрыт), потом слой — чтобы пустой слой не мелькнул над обоями.
+// Слой показываем, только если скрывали его сами: иначе после сбоя следующий запуск
+// «возвращал» бы пустой слой без иконок.
 void RestoreDesktopIcons(AppState& app) {
     if (!app.iconsWin || !IsWindow(app.iconsWin)) return;
-    if (app.iconsWereVisible) ShowWindow(app.iconsWin, SW_SHOWNA);
-    if (app.iconsLayer && IsWindow(app.iconsLayer) && GetAncestor(app.iconsWin, GA_ROOT) == app.iconsLayer)
-        ShowWindow(app.iconsLayer, SW_SHOWNA);
+    if (app.iconsWereVisible) ShowWindowAsync(app.iconsWin, SW_SHOWNA);
+    if (app.iconsLayerOurs && app.iconsLayer && IsWindow(app.iconsLayer))
+        ShowWindowAsync(app.iconsLayer, SW_SHOWNA);
+}
+
+// ---------- Файл сеанса ----------
+// Пока программа работает, в session.txt лежит то, что было ДО неё: включён ли Snap,
+// видны ли иконки, скрыт ли нами слой иконок. При чистом выходе файл удаляется. Если при
+// запуске он есть, прошлый сеанс оборвался (сбой, снятие процесса) и ничего не вернул:
+// система сейчас в «нашем» состоянии, и без файла мы приняли бы его за исходное —
+// выключенный Snap и спрятанные иконки остались бы такими навсегда.
+static std::wstring SessionPath() { return ConfigPath(L"session.txt"); }
+
+void SaveSession(AppState& app) {
+    app.sessionDirty = false;
+    std::ofstream f(SessionPath().c_str(), std::ios::binary | std::ios::trunc);
+    if (!f) return;
+    std::string s = "snap "  + std::to_string(app.prevWinArranging ? 1 : 0) + "\n"
+                  + "icons " + std::to_string(app.iconsWereVisible ? 1 : 0) + "\n"
+                  + "layer " + std::to_string(app.iconsLayerOurs ? 1 : 0) + "\n";
+    f.write(s.data(), (std::streamsize)s.size());
+}
+
+// Вызывается после DisableSnap и HideDesktopIcons: они уже записали в состояние то, что
+// застали; здесь оно поправляется по файлу оборванного сеанса.
+void BeginSession(AppState& app) {
+    std::ifstream f(SessionPath().c_str(), std::ios::binary);
+    if (f) {
+        std::string key; int v = 0;
+        while (f >> key >> v) {
+            if (key == "snap"  && v) app.prevWinArranging = TRUE;
+            if (key == "icons" && v && app.iconsWin) app.iconsWereVisible = true;
+            if (key == "layer" && v && app.iconsLayer) app.iconsLayerOurs = true;
+        }
+        f.close();
+        WallLog(L"session: previous run did not exit cleanly, restoring from its record");
+    }
+    SaveSession(app);
+}
+
+void EndSession() {
+    DeleteFileW(SessionPath().c_str());
 }
 
 // Включить осведомлённость о DPI на уровне монитора (для точных координат
@@ -300,6 +402,15 @@ void EnableDpiAwareness() {
         if (fn && fn((HANDLE)-4 /* PER_MONITOR_AWARE_V2 */)) return;
     }
     SetProcessDPIAware();
+}
+
+// Масштаб интерфейса для монитора: его DPI относительно 96. Свои окна (миникарта,
+// настройки) программа рисует в физических пикселях, поэтому масштабирует их сама.
+float MonitorScale(const AppState& app, HMONITOR hm) {
+    if (app.forceScale > 0.0f) return app.forceScale;
+    UINT dx = 96, dy = 96;
+    if (hm && SUCCEEDED(GetDpiForMonitor(hm, MDT_EFFECTIVE_DPI, &dx, &dy)) && dx > 96) return dx / 96.0f;
+    return 1.0f;
 }
 
 

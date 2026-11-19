@@ -30,7 +30,7 @@ void ComputeXform(AppState& app, const RECT& client) {
     double wH = (double)(b.bottom - b.top);
     if (wW < 1) wW = 1; if (wH < 1) wH = 1;
 
-    int pad = 10;
+    int pad = (int)lround(10 * app.uiScale);
     double cw = client.right - 2 * pad;
     double ch = client.bottom - 2 * pad;
     if (cw < 1) cw = 1; if (ch < 1) ch = 1;
@@ -88,8 +88,10 @@ void RefreshHud(AppState& app) {
 }
 
 // Кнопка-шестерёнка в правом-верхнем углу миникарты
-RECT GearRect(const RECT& client) {
-    return { client.right - 28, 4, client.right - 6, 26 };
+RECT GearRect(const AppState& app, const RECT& client) {
+    const float s = app.uiScale;
+    return { client.right - (LONG)lround(28 * s), (LONG)lround(4 * s),
+             client.right - (LONG)lround(6 * s),  (LONG)lround(26 * s) };
 }
 
 // ---------- Отрисовка миникарты (фон, бордюры, вьюпорт) ----------
@@ -99,14 +101,25 @@ RECT GearRect(const RECT& client) {
 // кэш, и объекты пересоздаются уже в новых цветах.
 static void EnsureMapGdi(AppState& app) {
     const Theme& T = app.theme;
-    if (!app.framePen) app.framePen.reset(CreatePen(PS_SOLID, 1, UiMix(T.accent, T.bg, 0.30f)));
+    const float s = app.uiScale;                       // толщины и шрифты — по DPI монитора
+    const int thin = max(1, (int)lround(1 * s)), thick = max(1, (int)lround(2 * s));
+    if (!app.framePen) app.framePen.reset(CreatePen(PS_SOLID, thin, UiMix(T.accent, T.bg, 0.30f)));
     if (!app.fillBr)   app.fillBr.reset(CreateSolidBrush(UiMix(T.accent, T.bg, 0.55f)));
     if (!app.mapBg)    app.mapBg.reset(CreateSolidBrush(T.bg));
-    if (!app.pinPen)   app.pinPen.reset(CreatePen(PS_SOLID, 2, T.warning));
-    if (!app.vpPen)    app.vpPen.reset(CreatePen(PS_SOLID, 2, T.accent));
+    if (!app.pinPen)   app.pinPen.reset(CreatePen(PS_SOLID, thick, T.warning));
+    if (!app.vpPen)    app.vpPen.reset(CreatePen(PS_SOLID, thick, T.accent));
+    if (!app.hudFont || app.hudFontScale != s) {
+        app.hudFontScale = s;
+        app.hudFont.reset(CreateFontW(-(int)lround(15 * s), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Variable Text"));
+        app.hudGearFont.reset(CreateFontW((int)lround(20 * s), 0, 0, 0, FW_NORMAL, 0, 0, 0,
+            DEFAULT_CHARSET, 0, 0, 0, 0, L"Segoe UI Symbol"));
+    }
 }
 void ResetMapGdi(AppState& app) {
     app.framePen.reset(); app.fillBr.reset(); app.mapBg.reset(); app.pinPen.reset(); app.vpPen.reset();
+    app.hudFont.reset(); app.hudGearFont.reset();
 }
 
 // Постоянный задний буфер миникарты. Раньше на каждый WM_PAINT (до 60 раз/с при
@@ -157,17 +170,15 @@ void DrawMinimap(AppState& app, HDC hdc, const RECT& client) {
     SelectObject(hdc, oldBr);
 
     SetBkMode(hdc, TRANSPARENT);
-    HGDIOBJ oldFont = SelectObject(hdc, UiFont());
+    HGDIOBJ oldFont = SelectObject(hdc, app.hudFont);
     SetTextColor(hdc, app.theme.muted);
     const wchar_t* tip = Tr(S_MAP_TIP);
-    TextOutW(hdc, 12, client.bottom - 22, tip, lstrlenW(tip));
+    TextOutW(hdc, (int)lround(12 * app.uiScale), client.bottom - (int)lround(22 * app.uiScale), tip, lstrlenW(tip));
     SelectObject(hdc, oldFont);
 
     // шестерёнка (настройки горячих клавиш)
-    static ScopedFont gearFont(CreateFontW(20, 0, 0, 0, FW_NORMAL, 0, 0, 0,
-        DEFAULT_CHARSET, 0, 0, 0, 0, L"Segoe UI Symbol"));
-    RECT gr = GearRect(client);
-    HGDIOBJ of = SelectObject(hdc, gearFont);
+    RECT gr = GearRect(app, client);
+    HGDIOBJ of = SelectObject(hdc, app.hudGearFont);
     SetTextColor(hdc, app.theme.muted);
     DrawTextW(hdc, L"⚙", -1, &gr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     SelectObject(hdc, of);

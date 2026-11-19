@@ -6,13 +6,6 @@
 using Microsoft::WRL::ComPtr;
 
 // ---------- Стиль Win11, шрифт, размещение миникарты ----------
-HFONT UiFont() {
-    static HFONT f = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Variable Text");
-    return f;
-}
-
 // Заголовок в цвет темы (тёмный/светлый) и скруглённые углы (Windows 11)
 void ApplyWin11Style(AppState& app, HWND hwnd) {
     BOOL dark = app.theme.dark ? TRUE : FALSE;
@@ -28,7 +21,8 @@ static void SaveUiCfg(AppState& app) {
     if (f) {
         std::string s = "corner "  + std::to_string(app.corner) + "\n"
                       + "mmb "     + std::to_string(app.mmbAnywhere.load() ? 1 : 0) + "\n"
-                      + "maxmove " + std::to_string(app.moveMaximized ? 1 : 0) + "\n";
+                      + "maxmove " + std::to_string(app.moveMaximized ? 1 : 0) + "\n"
+                      + "glide "   + std::to_string(app.glideEnabled ? 1 : 0) + "\n";
         f.write(s.data(), s.size());
     }
 }
@@ -40,6 +34,7 @@ void LoadUiCfg(AppState& app) {
         if (key == "corner" && v >= 0 && v <= 3) app.corner = v;
         if (key == "mmb")                        app.mmbAnywhere.store(v != 0);
         if (key == "maxmove")                    app.moveMaximized = (v != 0);
+        if (key == "glide")                      app.glideEnabled = (v != 0);
     }
 }
 
@@ -47,9 +42,15 @@ void LoadUiCfg(AppState& app) {
 void PlaceHud(AppState& app) {
     if (!app.hud) return;
     RECT wa; SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
-    int x = (app.corner == 0 || app.corner == 2) ? wa.left + MAP_MARGIN : wa.right - MAP_W - MAP_MARGIN;
-    int y = (app.corner == 0 || app.corner == 1) ? wa.top + MAP_MARGIN  : wa.bottom - MAP_H - MAP_MARGIN;
-    SetWindowPos(app.hud, HWND_TOPMOST, x, y, MAP_W, MAP_H, SWP_NOACTIVATE);
+    // Размер — по масштабу основного монитора: на 200 % миникарта в физических пикселях
+    // была бы вдвое мельче задуманного.
+    POINT origin = { 0, 0 };
+    float s = MonitorScale(app, MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY));
+    if (s != app.uiScale) { app.uiScale = s; ResetMapGdi(app); }   // перья и шрифты — под новый масштаб
+    int w = (int)lround(MAP_W * s), h = (int)lround(MAP_H * s), m = (int)lround(MAP_MARGIN * s);
+    int x = (app.corner == 0 || app.corner == 2) ? wa.left + m : wa.right - w - m;
+    int y = (app.corner == 0 || app.corner == 1) ? wa.top + m  : wa.bottom - h - m;
+    SetWindowPos(app.hud, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE);
 }
 
 // ---------- Горячие клавиши ----------
@@ -82,9 +83,11 @@ void InitDefaultKeys(AppState& app) {
     }
 }
 
+// Сочетание может быть занято другой программой — тогда RegisterHotKey откажет. Раньше
+// результат не проверялся: в настройках сочетание выглядело назначенным, но не работало.
 void RegisterAllHotkeys(AppState& app) {
     for (int id = HK_LEFT; id <= HK_LAST; ++id)
-        RegisterHotKey(app.hud, id, app.keys[id].mods, app.keys[id].vk);
+        app.keyFailed[id] = !RegisterHotKey(app.hud, id, app.keys[id].mods, app.keys[id].vk);
 }
 void UnregisterAllHotkeys(AppState& app) {
     for (int id = HK_LEFT; id <= HK_LAST; ++id) UnregisterHotKey(app.hud, id);
@@ -198,6 +201,18 @@ static const wchar_t* RowName(AppState& app, int id) {
     if (id == HK_GOTO1) return Tr(S_GOTO_GROUP);
     return app.keys[id].name;
 }
+// Строка настроек не работает: сочетание (для группы — любое из девяти) занято в системе.
+static bool RowFailed(AppState& app, int id) {
+    if (!IsGroup(id)) return app.keyFailed[id];
+    for (int i = 0; i < MARK_COUNT; ++i) if (app.keyFailed[id + i]) return true;
+    return false;
+}
+// Первое неработающее сочетание — для сообщения в окне настроек («» — все работают).
+static std::wstring FirstFailedText(AppState& app) {
+    for (int id = HK_LEFT; id <= HK_LAST; ++id)
+        if (app.keyFailed[id]) return L"⚠ " + KeyComboText(app.keys[id].mods, app.keys[id].vk) + Tr(S_ERR_SYSTEM_TAKEN);
+    return L"";
+}
 static std::wstring RowComboText(AppState& app, int id) {
     std::wstring s = KeyComboText(app.keys[id].mods, app.keys[id].vk);
     if (IsGroup(id)) s += L"…9";   // «Ctrl+Alt+1» → «Ctrl+Alt+1…9», «…Num 1» → «…Num 1…9»
@@ -239,8 +254,9 @@ bool ApplyCapture(AppState& app, UINT mods, UINT vk) {
         if (c != -1) { app.status = L"⚠ " + KeyComboText(mods, vk) + Tr(S_ERR_TAKEN) + app.keys[c].name; return false; }
         app.keys[row].mods = mods; app.keys[row].vk = vk;
     }
-    app.capRow = -1; app.status.clear();
+    app.capRow = -1;
     UnregisterAllHotkeys(app); RegisterAllHotkeys(app); SaveHotkeys(app);
+    app.status = FirstFailedText(app);   // назначили — но сочетание может быть занято в системе
     return true;
 }
 
@@ -268,6 +284,7 @@ SettingsLayout BuildLayout(AppState& app) {
     add(RK_CORNER, 0, Tr(S_OPT_CORNER), SW_H);
     add(RK_SWITCH, 0, Tr(S_OPT_MMB), SW_H);
     add(RK_SWITCH, 1, Tr(S_OPT_MAXMOVE), SW_H);
+    add(RK_SWITCH, 2, Tr(S_OPT_GLIDE), SW_H);
     y += 8;
     add(RK_RESET, 0, Tr(S_RESET), 40.f);
     if (!app.status.empty()) add(RK_STATUS, 0, nullptr, 24.f);
@@ -291,17 +308,19 @@ D2D1_RECT_F ResetRect(const SetRow& r) { return { PAD, r.y + 4, PAD + 196.f, r.y
 bool In(const D2D1_RECT_F& r, float x, float y) { return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom; }
 int MaxScroll(AppState& app, HWND hwnd) {
     RECT rc; GetClientRect(hwnd, &rc);
-    return (int)max(0.f, BuildLayout(app).contentH - (float)rc.bottom);
+    return (int)max(0.f, BuildLayout(app).contentH - (float)rc.bottom / app.setScale);
 }
 }
 
+static bool s_placing = false;   // OpenSettings сейчас сама ставит окно (см. WM_DPICHANGED)
+
 static void RenderSettings(AppState& app, HWND hwnd) {
-    if (!EnsureUiTarget(app, hwnd, app.setRT, app.setBrush)) return;
+    if (!EnsureUiTarget(app, hwnd, app.setRT, app.setBrush, app.setScale)) return;
     ID2D1HwndRenderTarget* rt = app.setRT.Get();
     ID2D1SolidColorBrush*  br = app.setBrush.Get();
     const Theme& T = app.theme;
     RECT rc; GetClientRect(hwnd, &rc);
-    const float W = (float)rc.right;
+    const float W = (float)rc.right / app.setScale;   // раскладка — в логических пикселях
     SettingsLayout L = BuildLayout(app);
     static const wchar_t* GLYPH[4] = { L"↖", L"↗", L"↙", L"↘" };
 
@@ -324,17 +343,18 @@ static void RenderSettings(AppState& app, HWND hwnd) {
             UiText(rt, br, app.fmtBody.Get(), r.title, label, T.text, DWRITE_TEXT_ALIGNMENT_LEADING);
             D2D1_RECT_F c = CtrlRect(W, r);
             bool cap = (app.capRow == r.id);
+            bool failed = !cap && RowFailed(app, r.id);   // занято другой программой — не работает
             UiFillRR(rt, br, c, RAD, T.control, 1.0f);
             if (cap) {   // фокус: кольцо 3 px (акцент 18 %) + рамка акцентом
                 D2D1_RECT_F ring = { c.left - 3.f, c.top - 3.f, c.right + 3.f, c.bottom + 3.f };
                 UiStrokeRR(rt, br, ring, RAD + 3.f, T.accent, 0.18f, 3.f);
                 UiStrokeRR(rt, br, c, RAD, T.accent, 1.0f, 1.f);
             } else {
-                UiStrokeRR(rt, br, c, RAD, T.border, 1.0f, 1.f);
+                UiStrokeRR(rt, br, c, RAD, failed ? T.danger : T.border, 1.0f, 1.f);
             }
             std::wstring t = cap ? (IsGroup(r.id) ? Tr(S_CAP_DIGIT) : Tr(S_CAP_KEYS))
                                  : RowComboText(app, r.id);
-            UiText(rt, br, app.fmtCtrl.Get(), t, c, cap ? T.accentInk : T.text, DWRITE_TEXT_ALIGNMENT_CENTER);
+            UiText(rt, br, app.fmtCtrl.Get(), t, c, cap ? T.accentInk : failed ? T.danger : T.text, DWRITE_TEXT_ALIGNMENT_CENTER);
             break;
         }
         case RK_CORNER: {
@@ -349,7 +369,7 @@ static void RenderSettings(AppState& app, HWND hwnd) {
             break;
         }
         case RK_SWITCH: {
-            bool on = (r.id == 0) ? app.mmbAnywhere.load() : app.moveMaximized;
+            bool on = (r.id == 0) ? app.mmbAnywhere.load() : (r.id == 1) ? app.moveMaximized : app.glideEnabled;
             UiText(rt, br, app.fmtBody.Get(), r.title, D2D1_RECT_F{ PAD, r.y, W - PAD - 50.f, r.y + r.h }, T.text, DWRITE_TEXT_ALIGNMENT_LEADING);
             D2D1_RECT_F s = SwitchRect(W, r);
             if (on) UiFillRR(rt, br, s, 11.f, T.accent, 1.0f);
@@ -396,10 +416,11 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_LBUTTONDOWN: {
         RECT rc; GetClientRect(hwnd, &rc);
-        const float W = (float)rc.right;
-        float x = (float)(short)LOWORD(lp), y = (float)(short)HIWORD(lp) + (float)app.setScroll;
+        const float W = (float)rc.right / app.setScale;
+        float x = (float)(short)LOWORD(lp) / app.setScale;
+        float y = (float)(short)HIWORD(lp) / app.setScale + (float)app.setScroll;
         SettingsLayout L = BuildLayout(app);
-        app.capRow = -1; app.status.clear();
+        app.capRow = -1; app.status = FirstFailedText(app);
         for (auto& r : L.rows) {
             if (y < r.y || y > r.y + r.h) continue;
             switch (r.kind) {
@@ -412,13 +433,15 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 break;
             case RK_SWITCH:   // переключается вся строка — цель крупнее
                 if (r.id == 0) app.mmbAnywhere.store(!app.mmbAnywhere.load());
-                else { app.moveMaximized = !app.moveMaximized; RepositionAll(app); }
+                else if (r.id == 1) { app.moveMaximized = !app.moveMaximized; RepositionAll(app); }
+                else { app.glideEnabled = !app.glideEnabled; app.glideBroken = false; }
                 SaveUiCfg(app);
                 break;
             case RK_RESET:
                 if (In(ResetRect(r), x, y)) {
                     InitDefaultKeys(app);
                     UnregisterAllHotkeys(app); RegisterAllHotkeys(app); SaveHotkeys(app);
+                    app.status = FirstFailedText(app);
                 }
                 break;
             }
@@ -431,12 +454,25 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_SYSKEYDOWN: {
         if (app.capRow < 0) break;
         UINT vk = (UINT)wp;
-        if (vk == VK_ESCAPE) { app.capRow = -1; app.status.clear(); InvalidateRect(hwnd, nullptr, FALSE); return 0; }
+        if (vk == VK_ESCAPE) { app.capRow = -1; app.status = FirstFailedText(app); InvalidateRect(hwnd, nullptr, FALSE); return 0; }
         if (IsModifierVk(vk)) return 0;
         UINT mods = CurrentMods();
         if (mods == 0) return 0;             // требуем хотя бы один модификатор
         ApplyCapture(app, mods, vk);         // не применилось (конфликт / не цифра для мест) —
         InvalidateRect(hwnd, nullptr, FALSE); // причина в status, остаёмся в перехвате
+        return 0;
+    }
+    case WM_DPICHANGED: {
+        // Окно перетащили на монитор с другим масштабом: система предлагает новый
+        // прямоугольник, содержимое перерисуется в новом масштабе.
+        // Если окно на другой монитор ставит сама OpenSettings, размер под его масштаб уже
+        // посчитан — предложенный системой прямоугольник масштабировал бы его второй раз.
+        if (s_placing) return 0;
+        app.setScale = app.forceScale > 0.0f ? app.forceScale : HIWORD(wp) / 96.0f;
+        const RECT* to = (const RECT*)lp;
+        SetWindowPos(hwnd, nullptr, to->left, to->top, to->right - to->left, to->bottom - to->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     }
     case WM_CLOSE:
@@ -456,26 +492,34 @@ void OpenSettings(AppState& app) {
     POINT pt; GetCursorPos(&pt);
     bool nearHud = app.hudVisible && app.hud;
     MONITORINFO mi = { sizeof(mi) };
-    GetMonitorInfoW(nearHud ? MonitorFromWindow(app.hud, MONITOR_DEFAULTTONEAREST)
-                            : MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), &mi);
+    HMONITOR mon = nearHud ? MonitorFromWindow(app.hud, MONITOR_DEFAULTTONEAREST)
+                           : MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    GetMonitorInfoW(mon, &mi);
     const RECT& wa = mi.rcWork;
-    float contentH = BuildLayout(app).contentH;
-    RECT cr = { 0, 0, SET_W, (LONG)min(contentH, (float)(wa.bottom - wa.top) - 48.f) };
+    // Размеры заданы в логических пикселях; окно — в физических, по масштабу монитора.
+    const float sc = app.setScale = MonitorScale(app, mon);
+    app.status = FirstFailedText(app);   // неработающие сочетания видно сразу при открытии
+    float contentH = BuildLayout(app).contentH * sc;
+    RECT cr = { 0, 0, (LONG)lround(SET_W * sc), (LONG)min(contentH, (float)(wa.bottom - wa.top) - 48.f * sc) };
     DWORD style = (DWORD)GetWindowLongW(app.settings, GWL_STYLE);
-    AdjustWindowRect(&cr, style, FALSE);
+    DWORD exStyle = (DWORD)GetWindowLongW(app.settings, GWL_EXSTYLE);
+    AdjustWindowRectExForDpi(&cr, style, FALSE, exStyle, (UINT)lround(96.0f * sc));
     int w = cr.right - cr.left, hgt = cr.bottom - cr.top;
+    int gap = (int)lround(6 * sc), edge = (int)lround(16 * sc);
     int x, yy;
     if (nearHud) {   // под миникартой; не помещается — над ней
         RECT hr; GetWindowRect(app.hud, &hr);
-        x = hr.right - w; yy = hr.bottom + 6;
-        if (yy + hgt > wa.bottom) yy = hr.top - 6 - hgt;
+        x = hr.right - w; yy = hr.bottom + gap;
+        if (yy + hgt > wa.bottom) yy = hr.top - gap - hgt;
     } else {         // из трея: у правого-нижнего края рабочей области
-        x = wa.right - w - 16; yy = wa.bottom - hgt - 16;
+        x = wa.right - w - edge; yy = wa.bottom - hgt - edge;
     }
     if (yy < wa.top) yy = wa.top;
     if (x + w > wa.right) x = wa.right - w;
     if (x < wa.left) x = wa.left;
+    s_placing = true;
     SetWindowPos(app.settings, HWND_TOPMOST, x, yy, w, hgt, SWP_SHOWWINDOW);
+    s_placing = false;
     SetForegroundWindow(app.settings);
     app.capRow = -1;
     InvalidateRect(app.settings, nullptr, TRUE);

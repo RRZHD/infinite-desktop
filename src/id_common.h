@@ -12,6 +12,7 @@
 #include <dwrite.h>
 #include <wincodec.h>
 #include <shellapi.h>
+#include <shellscalingapi.h>
 #include <wrl/client.h>
 #include <vector>
 #include <string>
@@ -32,6 +33,7 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "shcore.lib")
 
 #ifndef SPI_GETWINARRANGING
 #define SPI_GETWINARRANGING 0x0082
@@ -83,6 +85,7 @@ using ScopedFont      = ScopedRes<HFONT,      DeleteObject>;
 using ScopedRgn       = ScopedRes<HRGN,       DeleteObject>;
 using ScopedHandle    = ScopedRes<HANDLE,     CloseHandle>;
 using ScopedThumbnail = ScopedRes<HTHUMBNAIL, DwmUnregisterThumbnail>;
+using ScopedWindow    = ScopedRes<HWND,       DestroyWindow>;
 
 // ---------- Типы и константы ----------
 struct TrackedWin {
@@ -92,9 +95,63 @@ struct TrackedWin {
     bool            pinned;           // закреплено: не двигается с панорамой
     ScopedThumbnail thumb;            // живое DWM-превью на миникарте
     ScopedThumbnail thumbOv;          // живое DWM-превью в полноэкранном обзоре (зум)
+    // Тень в обзоре и плавной панораме (id_shadow.cpp): скрытое окно с картинкой тени и
+    // его превью, лежащее прямо под превью окна.
+    ScopedWindow    shadowSrc;
+    ScopedThumbnail thumbShadow;
+    RECT            shadowPad = {};   // на сколько тень выступает за видимую рамку окна, px
+    int             shadowW = 0, shadowH = 0;   // для какого размера рамки построена
+    UINT            shadowDpi = 0;
+    bool            shadowActive = false;       // построена как для активного окна
+    bool            shadowDark = false;         // …и как для окна с тёмным заголовком
     bool            parkedOff = false; // окно физически выставлено за кадром (отсечка RepositionAll)
+    bool            noBatch = false;   // само правит позицию в WM_WINDOWPOSCHANGING — двигать отдельно, не в пакете
+    bool            glideReal = false; // в плавной панораме остаётся настоящим (окно «поверх всех»)
+    bool            glideFixed = false;// в плавной панораме стоит на месте (закреплено или развёрнуто и приклеено)
     POINT           parkedPos = {};    // куда именно поставили при парковке (детекция чужих сдвигов)
 };
+// Окно, временно выпавшее из списка (свёрнуто, скрыто, либо список пересобирается), —
+// чтобы при возвращении не потерять его место на холсте и закрепление. Если окно стояло
+// «на парковке» за кадром и вернулось ровно туда же, его экранная позиция — не настоящая:
+// восстанавливаем мировую.
+struct AwayWin {
+    HWND  hwnd;
+    RECT  world;
+    bool  pinned;
+    bool  parked;       // на момент ухода стояло на парковке
+    POINT parkedPos;
+};
+// ---------- Панели у края экрана в обзоре ----------
+// Окно обзора лежит поверх всего и закрывает панель задач. Чтобы она не исчезала рывком,
+// в обзоре показывается её живое превью: при входе в зум оно уезжает за свой край экрана
+// и растворяется, при выходе — возвращается и к масштабу 1:1 ложится ровно на настоящую.
+struct OvBar {
+    ScopedThumbnail thumb;
+    RECT dst;        // место панели в клиенте окна обзора (1:1 с источником превью)
+    RECT clip;       // её монитор: за его пределы превью не выезжает (иначе въехало бы на соседний)
+    int  dx, dy;     // вектор ухода за край
+};
+const double BAR_EASE = 0.25;   // сглаживание ухода/возврата панели (доля за кадр при 60 Гц)
+
+// ---------- Плавная панорама ----------
+// Цель для рабочего потока: куда поставить настоящее окно.
+struct GlideMove { HWND hwnd; int x, y; };
+// Рабочий поток, двигающий настоящие окна, пока главный рисует кадры из превью. Системный
+// вызов перемещения дорог (доли миллисекунды на окно) и ждёт чужой поток — в цикле кадров
+// он и был причиной пропусков. Главный поток только кладёт сюда свежие цели.
+struct GlideMover {
+    HANDLE thread = nullptr;
+    HANDLE wake = nullptr;             // есть новые цели (auto-reset)
+    HANDLE idle = nullptr;             // поток ничего не двигает (manual-reset)
+    CRITICAL_SECTION cs;
+    std::vector<GlideMove> targets;    // последние цели (под cs)
+    unsigned version = 0;              // растёт с каждым обновлением целей (под cs)
+    double budgetMs = 2.5;             // сколько двигать за одно пробуждение (под cs) — см. PostTargets
+    bool quit = false;
+    GlideMover()  { InitializeCriticalSection(&cs); }
+    ~GlideMover() { DeleteCriticalSection(&cs); }
+};
+// Размеры миникарты — в логических пикселях (96 DPI); фактические умножаются на uiScale.
 const int   MAP_W = 420, MAP_H = 260, MAP_MARGIN = 16;
 const BYTE  HUD_ALPHA = 224;   // полупрозрачность миникарты (окно настроек непрозрачно — Direct2D)
 
@@ -121,8 +178,8 @@ enum StrId {
     S_LOCALE, S_KEY_PAN_LEFT, S_KEY_PAN_RIGHT, S_KEY_PAN_UP, S_KEY_PAN_DOWN, S_KEY_HOME, S_KEY_MAP,
     S_KEY_REFRESH, S_KEY_QUIT, S_KEY_PREVIEW, S_KEY_PIN, S_KEY_FOCUS_LEFT, S_KEY_FOCUS_RIGHT,
     S_KEY_FOCUS_UP, S_KEY_FOCUS_DOWN, S_MARK_FMT, S_GOTO_FMT, S_MARK_GROUP, S_GOTO_GROUP,
-    S_ERR_NEED_DIGIT, S_ERR_TAKEN, S_SEC_HOTKEYS, S_SEC_MARKS, S_SEC_BEHAVIOR, S_OPT_CORNER,
-    S_OPT_MMB, S_OPT_MAXMOVE, S_RESET, S_SETTINGS_TITLE, S_SETTINGS_HINT, S_CAP_KEYS, S_CAP_DIGIT,
+    S_ERR_NEED_DIGIT, S_ERR_TAKEN, S_ERR_SYSTEM_TAKEN, S_SEC_HOTKEYS, S_SEC_MARKS, S_SEC_BEHAVIOR, S_OPT_CORNER,
+    S_OPT_MMB, S_OPT_MAXMOVE, S_OPT_GLIDE, S_RESET, S_SETTINGS_TITLE, S_SETTINGS_HINT, S_CAP_KEYS, S_CAP_DIGIT,
     S_TRAY_TIP, S_MENU_SETTINGS, S_MENU_MAP, S_MENU_PREVIEW, S_MENU_REFRESH, S_MENU_EXIT,
     S_MAP_TIP, S_OV_HINT_FMT,
     S_COUNT
@@ -142,6 +199,7 @@ struct Theme {
              danger = 0, warning = 0, success = 0;
 };
 #define WM_TRAY (WM_APP + 1)   // сообщения иконки в трее (окно-владелец — миникарта)
+#define WM_SHOWSETTINGS (WM_APP + 2)   // второй запуск программы просит первый показать настройки
 
 // Текущее преобразование мир -> клиент миникарты
 struct MapXform { double s; LONG ox, oy; RECT bounds; };
@@ -153,7 +211,10 @@ const double ZOOM_STEP = 1.07;   // мягкий множитель на оди�
 const double ZOOM_EASE = 0.18;   // сглаживание масштаба обзора
 
 // Сохранённая раскладка окон (layout.txt)
-struct SavedWin { std::wstring cls, title; RECT world; bool used; };
+// exe — имя программы; пустое у записей старого формата (тогда программа не сверяется).
+struct SavedWin { std::wstring exe, cls, title; RECT world; bool used; };
+// Ключ окна для сопоставления с сохранённой раскладкой.
+struct WinKeyId { std::wstring exe, cls, title; };
 
 // ---------- Состояние приложения ----------
 // Всё изменяемое состояние собрано в один объект и передаётся в функции по ссылке.
@@ -162,7 +223,9 @@ struct SavedWin { std::wstring cls, title; RECT world; bool used; };
 struct AppState {
 
     std::vector<TrackedWin> wins;
-    double camX = 0, camY = 0;          // текущая камера (мировая точка в левом-верхнем углу виртуального экрана)
+    std::vector<AwayWin>    away;       // временно выпавшие окна (см. AwayWin)
+    HWND pendingFocus = nullptr;        // активировано окно, которого ещё нет в списке — подъехать, когда появится
+    double camX = 0, camY = 0;         // текущая камера (мировая точка в левом-верхнем углу виртуального экрана)
     double targetX = 0, targetY = 0;    // целевая камера (для плавной анимации)
 
     // Виртуальный экран (объединение всех мониторов)
@@ -182,6 +245,12 @@ struct AppState {
     bool hudDrag = false;                  // зажата ЛКМ на миникарте (перетаскивание)
     DWORD lastHudTick = 0, lastSyncTick = 0;  // троттлинг миникарты/синхронизации по времени
     KeyBind keys[HK_LAST + 1];  // индекс = HK_*
+    bool keyFailed[HK_LAST + 1] = {};   // RegisterHotKey не удался: сочетание занято другой программой
+    // Масштаб интерфейса по DPI монитора: миникарта (основной монитор) и окно настроек
+    // (монитор, где оно открыто). forceScale > 0 — принудительный масштаб для тестов.
+    float uiScale = 1.0f, setScale = 1.0f, forceScale = 0.0f;
+    ScopedFont hudFont, hudGearFont;    // шрифты миникарты под текущий uiScale
+    float hudFontScale = 0.0f;
     CamMark marks[MARK_COUNT];  // закладки камеры (marks.txt)
     HWND settings = nullptr;    // окно настроек горячих клавиш
     int  capRow = -1;           // строка в режиме перехвата клавиш (или -1)
@@ -196,6 +265,11 @@ struct AppState {
     POINT      lastMouse = {};
     std::atomic<long> dragDeltaX = 0;
     std::atomic<long> dragDeltaY = 0;
+    // Колесо и тачпад: hook-поток только копит дельты, применяет их главный поток в кадре
+    // (ApplyWheelInput) — масштаб, якорь зума и цель камеры меняются в одном потоке.
+    std::atomic<long>      wheelZoom = 0;            // сумма дельт колеса для зума
+    std::atomic<long long> wheelZoomPt = 0;          // точка последнего шага: x в старших 32 битах, y в младших
+    std::atomic<long>      wheelPanX = 0, wheelPanY = 0;   // двухпальцевая панорама
 
     // Отслеживание изменения камеры для троттлинга перерисовки
     double lastCamX = 1e18, lastCamY = 1e18;
@@ -208,14 +282,29 @@ struct AppState {
     ScopedThumbnail wallThumb;             // живое превью хоста обоев на подложке
     RECT            wallDst = {};          // куда превью ложится в клиенте подложки
     bool            ovLiveBg = false;      // текущий сеанс обзора идёт с живым фоном
-    bool          overview = false;        // активен ли обзор
+    std::atomic_bool overview = false;     // активен ли обзор (читает и hook-поток)
+    std::vector<OvBar> ovBars;             // панели у края экрана (панель задач и её замены)
+    double barP = 0;                       // 0 — панели на месте, 1 — ушли за край
+    double ovLastBarP = -1;                // для перерисовки обзора только при изменениях
+    // Плавная панорама: пока камера движется, поверх обычных окон лежит слой с их живыми
+    // превью и двигаются превью (дёшево, на частоте монитора); настоящие окна тем временем
+    // догоняет рабочий поток, а на места они встают, когда движение закончилось.
+    bool glideEnabled = true;              // настройка (ui.txt)
+    bool glide = false;                    // слой превью сейчас показан
+    bool glideBroken = false;              // слой создать не удалось — работаем по-старому
+    double framePeriod = 1.0 / 60.0;       // период обновления монитора, с (задаёт wWinMain)
+    double glideBudget = 0.4;              // доля периода, которую рабочий поток двигает окна за кадр
+    std::vector<ScopedThumbnail> glideStatic;   // превью неотслеживаемых окон (диалоги и т.п.) — стоят на месте
+    GlideMover mover;
     double        zoom = 1.0;              // текущий масштаб обзора (<=1)
     double        zoomTarget = 1.0;        // целевой масштаб
     // Якорь зума: мировая точка axW удерживается в клиентской точке axC
     double        axWX = 0, axWY = 0, axCX = 0, axCY = 0;
     // Перетаскивание окна/панорама внутри обзора
     HWND          ovDragHwnd = nullptr;    // перетаскиваемое окно (или nullptr — фон)
-    POINT         ovDragLast = {};
+    POINT         ovDragLast = {};         // прошлая точка курсора (панорама фона)
+    POINT         ovDownPt = {};           // где нажали — от неё считается порог начала перетаскивания
+    double        ovGrabX = 0, ovGrabY = 0;   // точка захвата окна: мировое смещение курсора от его угла
     bool          ovDragMoved = false;
     // ---- Direct2D: обзор рисуется на GPU ----
     // Device-independent (живут весь процесс):
@@ -254,10 +343,19 @@ struct AppState {
     BOOL prevWinArranging = TRUE;          // прежнее состояние Aero Snap
     HWND iconsWin = nullptr;               // окно иконок рабочего стола (SHELLDLL_DefView)
     bool iconsWereVisible = false;
-    HWND iconsLayer = nullptr;             // скрытое нами окно-слой иконок (отдельный WorkerW), если такой есть
+    HWND iconsLayer = nullptr;             // окно-слой иконок (отдельный WorkerW), если такой есть
+    bool iconsLayerOurs = false;           // слой скрыли мы — при выходе вернуть
+    // Незавершённый сеанс (session.txt): что было ДО нас, чтобы после сбоя следующий запуск
+    // вернул Snap и иконки. sessionDirty — состояние изменилось, файл надо переписать.
+    bool sessionDirty = false;
+    bool sessionEnding = false;            // Windows завершает сеанс: раскладка сохранена, автосохранение стоит
+    // Автосохранение раскладки: хэш позиций и момент последнего изменения.
+    unsigned long long layoutHash = 0;
+    DWORD layoutChangedTick = 0;
+    bool  layoutDirty = false;
     // Диагностика: окно, над которым колесо запустило зум (пишет hook-поток, читает ShowOverview).
     std::atomic<HWND> zoomSrc = nullptr;
-    HWND zoomSrcLogged = nullptr;
+    std::vector<HWND> zoomSrcLogged;       // уже записанные в лог
 
     // Кэш GDI-объектов миникарты (перья/кисти создаются один раз)
     ScopedPen   framePen, pinPen, vpPen;
@@ -290,11 +388,16 @@ inline double OvWorldY(const AppState& app, double cy)  { return app.axWY + (cy 
 // и сюда не вынесено.
 // id_input.cpp — колёсный зум и глобальный хук мыши ( MouseProc нужен id_procs.cpp )
 LRESULT CALLBACK MouseProc(int code, WPARAM wp, LPARAM lp);
+bool WheelInputPending(const AppState& app);
+void ApplyWheelInput(AppState& app);            // применить накопленное колесо (главный поток)
 // id_layout.cpp — раскладка, закладки и общий каталог сохраняемых файлов
 std::wstring ConfigPath(const wchar_t* file);
 void SaveLayout(AppState& app);
+void AutoSaveLayout(AppState& app);             // сохранить, когда раскладка изменилась и устоялась
 void LoadLayout(AppState& app);
 void ArrangeOnStartup(AppState& app);
+// Сопоставление окон с сохранённой раскладкой: для каждого ключа — индекс записи или -1.
+std::vector<int> MatchSavedLayout(std::vector<SavedWin>& saved, const std::vector<WinKeyId>& keys);
 void GatherToDesktop(AppState& app);
 void LoadMarks(AppState& app);
 void SetMark(AppState& app, int i);
@@ -304,8 +407,7 @@ void ComputeXform(AppState& app, const RECT& client);
 void MapToWorld(AppState& app, int mx, int my, double& wx, double& wy);
 void UpdateThumbs(AppState& app, const RECT& client);
 void RefreshHud(AppState& app);   // пересчёт превью + WM_PAINT миникарты
-HFONT UiFont();
-RECT GearRect(const RECT& client);
+RECT GearRect(const AppState& app, const RECT& client);
 void DrawMinimap(AppState& app, HDC hdc, const RECT& client);
 void EnsureHudCache(AppState& app, HDC ref, int w, int h);
 void ResetMapGdi(AppState& app);
@@ -317,6 +419,23 @@ void HideOverview(AppState& app);
 void CommitZoomCam(AppState& app);
 void UpdateOverview(AppState& app);
 void RenderOverview(AppState& app, HWND hwnd);
+void PrepareOvBackground(AppState& app);        // фон окна обзора: живые обои либо снимок
+void RegisterOvBars(AppState& app);             // превью панелей у края экрана — поверх превью окон
+// id_shadow.cpp — тени окон в обзоре и плавной панораме (как у Windows)
+void EnsureShadow(AppState& app, TrackedWin& w);
+void RefreshShadowStates(AppState& app);
+// Та же тень в виде вложенных контуров — для рисования Direct2D. Слой: добавляемая
+// непрозрачность и на сколько контур выступает за рамку окна с каждой стороны (px при 100 %).
+struct ShadowLayer { float alpha, dl, dt, dr, db; };
+const std::vector<ShadowLayer>& ShadowLayers(bool active, bool dark);
+void BuildShadowBitmap(int W, int H, bool active, bool dark, double scale, std::vector<DWORD>& px,
+                       int& srcW, int& srcH, RECT& pad);
+// id_glide.cpp — плавная панорама (слой превью + рабочий поток для настоящих окон)
+bool BeginGlide(AppState& app);
+void GlideFrame(AppState& app);                 // кадр: превью на места и показ (ждёт vblank)
+void EndGlide(AppState& app);                   // настоящие окна на места, слой убрать
+void GlideRestack(AppState& app);               // порядок окон изменился — пересобрать превью
+void StopGlideMover(AppState& app);             // при выходе: остановить рабочий поток
 void InitGraphics(AppState& app);
 void CreateOverviewBackdrop(AppState& app, HINSTANCE hi);
 RECT VisWorld(const TrackedWin& w);
@@ -330,10 +449,13 @@ void BringWindowIntoView(AppState& app, const TrackedWin& w);
 void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG, DWORD, DWORD);
 void DisableSnap(AppState& app);
 void RestoreSnap(AppState& app);
-void HideDesktopIcons(AppState& app);
-void RecheckDesktopIcons(AppState& app);
+void HideDesktopIcons(AppState& app);           // спрятать иконки (и их слой); вызывается и периодически
 void RestoreDesktopIcons(AppState& app);
+void BeginSession(AppState& app);               // session.txt: учесть незавершённый прошлый сеанс и начать новый
+void SaveSession(AppState& app);
+void EndSession();                              // чистое завершение — файл сеанса убрать
 void EnableDpiAwareness();
+float MonitorScale(const AppState& app, HMONITOR hm);   // DPI монитора / 96
 // id_settings.cpp — стиль Win11, размещение миникарты, горячие клавиши, окно настроек
 void ApplyWin11Style(AppState& app, HWND hwnd);
 void LoadUiCfg(AppState& app);
@@ -354,7 +476,7 @@ void OnThemeChanged(AppState& app);
 COLORREF UiMix(COLORREF a, COLORREF b, float t);
 D2D1_COLOR_F ToD2D(COLORREF c, float a);
 bool EnsureUiTarget(AppState& app, HWND hwnd, Microsoft::WRL::ComPtr<ID2D1HwndRenderTarget>& rt,
-                    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>& br);
+                    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>& br, float scale);
 void UiFillRR(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* br, const D2D1_RECT_F& r, float rad, COLORREF c, float a);
 void UiStrokeRR(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* br, const D2D1_RECT_F& r, float rad, COLORREF c, float a, float w);
 void UiText(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* br, IDWriteTextFormat* f, const std::wstring& s,
@@ -374,8 +496,17 @@ void RebuildWindowList(AppState& app);
 void SyncWorldFromScreen(AppState& app);
 bool IsTracked(AppState& app, HWND h);
 bool IsTopLevelWindow(HWND h);
+bool IsShellDesktopWindow(HWND root);           // окно верхнего уровня — рабочий стол оболочки
+std::wstring ExeName(DWORD pid);                // имя программы процесса (без пути) или "?"
 void AddNewWindows(AppState& app);
+void RegisterOvThumb(AppState& app, TrackedWin& w);
+void RepositionGlideReal(AppState& app);
+void PlanGlideMoves(AppState& app, std::vector<GlideMove>& out);
+bool PruneDeadWindows(AppState& app);           // убрать из списка закрытые окна; true — что-то убрано
 void RepositionAll(AppState& app);
+// Чистая геометрия (покрыта тестами): место парковки окна за кадром и выбор окна по направлению.
+void ParkPosition(const RECT& screen, LONG width, LONG height, int& x, int& y);
+int  PickFocusTarget(const std::vector<RECT>& worlds, int self, double ox, double oy, int dx, int dy);
 void PanBy(AppState& app, double dx, double dy);
 void GoHome(AppState& app);
 void FocusDir(AppState& app, int dx, int dy);
